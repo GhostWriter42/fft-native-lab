@@ -15,6 +15,11 @@ args = [a for a in sys.argv[1:]]
 with_functions = '--functions' in args
 if with_functions:
     args.remove('--functions')
+data_only = []                                     # --data-only=mod.yaml : modules the build LINKS to but does not include (their data symbols are bound, their functions are not)
+for a in list(args):
+    if a.startswith('--data-only='):
+        data_only.append(a.split('=', 1)[1])
+        args.remove(a)
 repo, out = Path(args[0]), args[1]
 mods = args[2:] or ['main.yaml', 'battle.yaml']
 row = re.compile(r'^\s*-\s*\{addr:\s*(0x[0-9a-fA-F]+),\s*name:\s*([A-Za-z_]\w*)\}\s*$')
@@ -26,13 +31,13 @@ for y in (repo / 'target').glob('*.yaml'):
     for _, _, name, _ in yamlfuncs.module_functions(y):
         functions.add(name)
 seen, lines, clash, dropped = {}, [], 0, 0
-for m in mods:
+for m in mods + data_only:
     for l in (repo / 'target' / m).read_text().splitlines():
-        r = row.match(l) or (fn_row.match(l) if with_functions else None)
+        r = row.match(l) or (fn_row.match(l) if (with_functions and m not in data_only) else None)
         if not r:
             continue
         addr, name = int(r.group(1), 16), r.group(2)
-        if name in functions and not with_functions:
+        if name in functions and (not with_functions or m in data_only):
             dropped += 1
             continue
         if name in seen:

@@ -91,7 +91,7 @@ static void replay_one(int fi, int t) {
             }
         }
         shared->trace_n = 0; shared->trace_on = 0; shared->marker = 0; shared->ndiff = 0;
-        g_native_seed = g_rng; g_native_rand_calls = 0; g_stub_calls = 0;
+        g_bios_rand_seed = g_rng; g_bios_rand_calls = 0; g_stub_calls = 0;
         pid = sys3(2, 0, 0, 0);
         if (pid == 0) {
             unsigned a, cnt = 0;

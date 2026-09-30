@@ -369,7 +369,22 @@ def main():
             dst.parent.mkdir(parents=True, exist_ok=True)
             dst.write_bytes(new.encode('utf-8'))
             report['files'] += 1
+    # 5. reviewed native patches (port/native/native_patches.py): retail-ABI accidents that need an explicit source-level fix
+    patch_file = Path(__file__).resolve().parent.parent / 'native' / 'native_patches.py'
+    npatched = 0
+    if patch_file.exists():
+        ns = {}
+        exec(compile(patch_file.read_text(encoding='utf-8'), str(patch_file), 'exec'), ns)
+        for pt in ns.get('PATCHES', []):
+            dst = outdir / pt['file']
+            text = dst.read_bytes().decode('utf-8')
+            want = pt.get('count', 1)
+            if text.count(pt['old']) != want:
+                sys.exit(f"native patch must match {want} time(s) in {pt['file']}: {pt['old']!r} (found {text.count(pt['old'])})")
+            dst.write_bytes(text.replace(pt['old'], pt['new']).encode('utf-8'))
+            npatched += 1
     lines = [
+        f"native patches applied:    {npatched} (port/native/native_patches.py)",
         f"files written:             {report['files']}",
         f"register pins removed:     {report['pins']} (in {len(report['pins_by_file'])} files)",
         f"empty asm statements gone: {report['barriers']} (in {len(report['barriers_by_file'])} files)",

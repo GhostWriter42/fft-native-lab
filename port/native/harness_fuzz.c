@@ -64,12 +64,7 @@ static int streq(const char* a, const char* b) { while (*a && *a == *b) { a++; b
  * PS1-address scheme: names that are functions in the game's yaml (rand, srand, bzero, strlen, memset, memmove) are defined
  * as native_<name>; the game's references to the plain names resolve to their PS1 addresses and reach these through the
  * trampolines. `abs` is not in the yaml and keeps its plain name. */
-static unsigned g_native_seed = 1, g_native_rand_calls;
-int abs(int x) { return x < 0 ? -x : x; }
-int native_rand(void) { g_native_rand_calls++; g_native_seed = g_native_seed * 1103515245u + 12345u; return (int)((g_native_seed >> 16) & 0x7fff); }
-void native_srand(unsigned seed) { g_native_seed = seed; }
-void native_bzero(void* d, int n) { unsigned char* p = (unsigned char*)d; while (n-- > 0) *p++ = 0; }
-int native_strlen(const char* s) { int n = 0; while (s[n]) n++; return n; }
+extern unsigned g_bios_rand_seed, g_bios_rand_calls;                          /* bios_rt.c: the native BIOS services (rand, memset, strcpy, ...) */
 extern unsigned g_stub_calls;             /* incremented by every generated stub (an SDK function the native build does not provide) */
 
 /* ------------------------------------------------------------------------------------------------- tables */
@@ -79,6 +74,9 @@ extern const int g_fuzz_fn_count;
 struct sym { unsigned int addr; const char* name; };
 extern const struct sym g_syms[];
 extern const int g_sym_count;
+struct module_file { const char* path; unsigned int addr; };
+extern const struct module_file g_module_files[];                        /* gen_modinfo.py: the overlay images to load next to SCUS_942.21 */
+extern const unsigned int g_foreign_entries[];                           /* entries of functions of linked modules that are not in this build: a trial that calls one is skipped */
 struct sdk_range { unsigned int lo, hi; const char* id; };
 extern const struct sdk_range g_sdk_ranges[];
 extern const int g_sdk_range_count;
@@ -101,7 +99,9 @@ extern const int g_scalar_global_count;
 static unsigned g_rng = 2463534242u;
 static unsigned rnd(void) { g_rng ^= g_rng << 13; g_rng ^= g_rng >> 17; g_rng ^= g_rng << 5; return g_rng; }
 
+#ifndef WIN_LO
 #define WIN_LO 0x801e0000u                       /* scratch window: argument buffers + targets for pointer-like words */
+#endif
 #define WIN_HI 0x801f0000u                       /* [0x801f0000, 0x80200000) is the interpreter's stack: never compared */
 #define BUF_STRIDE 0x400u                        /* argument buffers: 10 x 1 KiB at the start of the window */
 #define BUF_WORDS_LIMIT 0x10000u                 /* pointer-like words point anywhere into the 64 KiB window */
@@ -159,12 +159,16 @@ static void copy_ram_to_interp_all(void) {
 /* RAM words that legitimately differ: the retail thread switch saves s0-s7/k0/k1/gp/sp/fp/ra into each thread record (+0x10..+0x47),
  * the native scheduler keeps its machine context outside RAM (see replacements/battle_thread.c); the call-on-main-stack routine
  * parks $ra in a word after its own code. */
-extern char g_battle_thread_contexts[];
+extern char g_battle_thread_contexts[] __attribute__((weak));       /* absent in builds without the BATTLE module */
+extern char g_world_thread_contexts[] __attribute__((weak));        /* absent in builds without the WORLD module (17 records) */
 static int __attribute__((no_instrument_function)) ignored_word(unsigned a) {
-    unsigned base = (unsigned)g_battle_thread_contexts;
-    if (a >= base && a < base + 16 * 0x400) { unsigned off = (a - base) & 0x3ff; if (off >= 0x10 && off < 0x48) return 1; }
-    return a == 0x8014cf5cu;
+    unsigned base = (unsigned)g_battle_thread_contexts, wbase = (unsigned)g_world_thread_contexts;
+    if (base && a >= base && a < base + 16 * 0x400) { unsigned off = (a - base) & 0x3ff; if (off >= 0x10 && off < 0x48) return 1; }
+    if (wbase && a >= wbase && a < wbase + 17 * 0x400) { unsigned off = (a - wbase) & 0x3ff; if (off >= 0x10 && off < 0x48) return 1; }
+    return a == 0x8014cf5cu || a == 0x8010042cu;         /* the saved $ra words of battle_ / world_thread_call_on_main_stack */
 }
+/* the original called a function of a module that is not part of this build: whatever it would run is not comparable -> the trial faults and is skipped */
+static int foreign_call(r3k_t* c, unsigned int addr) { (void)c; (void)addr; return 1; }
 static void fault_handler(int sig, void* info, void* uc) {
     shared->fault_sig = (unsigned)sig;
     shared->fault_addr = *(unsigned*)((char*)info + 12);
@@ -322,7 +326,7 @@ static int unspecified_ret(const char* n) {
 
 int main_test(void) {
     int fi, t, total_fn = 0, tested_fn = 0, untested_fn = 0, nonnative = 0, bad_fn = 0, known_skipped = 0;
-    long total_cmp = 0, total_bad = 0, total_skip = 0, total_unspec = 0;
+    long total_cmp = 0, total_bad = 0, total_skip = 0, total_unspec = 0, tk_fault = 0, tk_io = 0, tk_code = 0, tk_wild = 0, tk_sdk = 0;
     static gte_state_t gte_before;
 #ifdef ONLY_FN
     replay_one(ONLY_FN, ONLY_TRIAL);
@@ -374,7 +378,7 @@ int main_test(void) {
             interp_div = (int)(cpu.div_zero + cpu.div_overflow);
             ret_i = mask_ret(f->ret, cpu.r[2]);
             shared->marker = 0; shared->ndiff = 0; shared->stub_calls = 0;
-            g_native_seed = g_rng; g_native_rand_calls = 0; g_stub_calls = 0;
+            g_bios_rand_seed = g_rng; g_bios_rand_calls = 0; g_stub_calls = 0;
             pid = sys3(2, 0, 0, 0);
             if (pid == 0) {
                 unsigned a, n = 0, r;
@@ -420,6 +424,7 @@ int main_test(void) {
             }
         }
         total_cmp += cmp; total_bad += mism + crashes; total_skip += sk_fault + sk_io + sk_code + sk_wild + sk_sdk;
+        tk_fault += sk_fault; tk_io += sk_io; tk_code += sk_code; tk_wild += sk_wild; tk_sdk += sk_sdk;
         if (cmp) tested_fn++; else untested_fn++;
         total_unspec += unspec;
         if (mism || crashes || stub_paths) {
@@ -435,6 +440,7 @@ int main_test(void) {
     outnum(nonnative); out(" not linked natively, "); outnum(known_skipped); out(" known CPU-register functions skipped. Trials: "); outnum(total_cmp); out(" compared, "); outnum(total_skip); out(" skipped; ");
     outnum(bad_fn); out(" functions flagged ("); outnum(total_bad); out(" mismatching or crashing trials); ");
     outnum(total_unspec); out(" more trials differed only in the unspecified return value of a function that can fall off its end\n");
+    out("   skipped trials by reason of the ORIGINAL run: fault/timeout/foreign call "); outnum(tk_fault); out(", hardware "); outnum(tk_io); out(", read/wrote its own code "); outnum(tk_code); out(", unreachable address "); outnum(tk_wild); out(", SDK call "); outnum(tk_sdk); out("\n");
     return total_bad != 0;
 }
 
@@ -443,8 +449,9 @@ void _start(void) {
     if (!map_ram()) { out("mmap FAILED\n"); sys3(1, 1, 0, 0); }
     shared = (struct result*)map_shared(16384);
     load_file("/disc/SCUS_942.21", 0x8000f800);
-    load_file("/disc/BATTLE.BIN", 0x80067000);
+    for (i = 0; g_module_files[i].path; i++) load_file(g_module_files[i].path, g_module_files[i].addr);          /* the overlays of this build (module_files.c) */
     r3k_reset(&cpu, interp_ram);
+    cpu.hle = foreign_call; for (i = 0; g_foreign_entries[i]; i++) r3k_hle_add(&cpu, g_foreign_entries[i]);
     copy_ram_to_interp_all();
     { unsigned i; for (i = 0; i < 0x200000; i += 4) *(unsigned*)(pristine_ram + i) = *(unsigned*)(interp_ram + i); }
     build_ranges_and_install();

@@ -6,10 +6,11 @@
 #      RENAME (non-empty: PS1-address scheme -- every defined function that appears in fn_names.txt is renamed to native_<name>
 #              in its object, so references keep the original name, which symbols_pc.ld binds to the PS1 address)
 #      LDFILE (default /port/build/native/symbols.ld; symbols_pc.ld with RENAME)
+#      FN     (default /port/build/native/fn_names.txt: the yaml function names that RENAME turns into native_<name>)
 #      DIVFIX (non-empty: expand every idiv/div with the MIPS zero/-1 divisor semantics, port/tools/divfix.awk)
 #      EXTRA_CFLAGS (e.g. -ftrivial-auto-var-init=zero)
 DIRS=${DIRS:-"src/main src/battle"}; OUT=${OUT:-/port/build/native/all}
-FN=/port/build/native/fn_names.txt
+FN=${FN:-/port/build/native/fn_names.txt}
 LDFILE=${LDFILE:-/port/build/native/symbols.ld}
 rm -rf "$OUT"; mkdir -p "$OUT/o"
 CF="-m32 -O1 -w -std=gnu89 -funsigned-char -fcommon -ffreestanding -fno-builtin -fno-pic -fno-pie -fno-stack-protector -fno-strict-aliasing -fno-aggressive-loop-optimizations -fwrapv -nostdinc -I/port/native/shim -I/port/native/gte -I/port/build/portable/include -include psx/gte_inline.h $EXTRA_CFLAGS"

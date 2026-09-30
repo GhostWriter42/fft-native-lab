@@ -1,3 +1,11 @@
 src/battle/battle_thread_start.c
 src/main/main.c
 src/main/main_system_store_stack_pointer.c
+src/world/world_script_copy_bytes.c
+src/world/world_text_skip_to_entry.c
+src/world/world_thread_is_previous_running.c
+src/world/world_thread_get_current_parameter_1.c
+src/world/world_thread_is_running_80100164.c
+src/world/world_thread_get_current_parameter_2.c
+src/world/world_thread_get_current_parameter_3.c
+src/world/world_thread_start.c

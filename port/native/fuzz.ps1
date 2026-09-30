@@ -1,6 +1,9 @@
-# Generic function-level differential fuzzer: every decompiled game function in src/main + src/battle whose signature can be
-# called generically, native build vs the ORIGINAL machine code (R3000 interpreter), on random arguments.
-#   .\port\native\fuzz.ps1 [-Trials 40] [-From 0] [-To 100000] [-AutoInit] [-DivFix] [-Sdk] [-Rebuild] [-Replay 'index,trial;index,trial'] [-Cflags '-DVERBOSE']
+# Generic function-level differential fuzzer: every decompiled game function of the chosen modules whose signature can be called
+# generically, native build vs the ORIGINAL machine code (R3000 interpreter), on random arguments.
+#   .\port\native\fuzz.ps1 [-Modules main,battle] [-Trials 40] [-From 0] [-To 100000] [-AutoInit] [-DivFix] [-Sdk] [-Rebuild] [-Replay 'index,trial;index,trial'] [-Cflags '-DVERBOSE']
+# -Modules   the code modules of the build, main first: main,battle (default) | main,wldcore,world | main,opening,world | ... (target\*.yaml stems).
+#            Modules that share a load address (battle / wldcore / opening at 0x80067000) cannot be in one build; each build gets its own
+#            generated tables and objects under port\build\native\fz_<modules> (the default keeps port\build\native).
 # PS1-address scheme: natively compiled functions are linked as native_<name>, the original names are bound to their PS1
 # addresses and reached through x86 trampolines, so function pointers stored in RAM stay canonical PS1 addresses.
 # -AutoInit  compile the game with -ftrivial-auto-var-init=zero (the recommended native flag: uninitialised locals read 0)
@@ -8,26 +11,37 @@
 # -Sdk       also build and fuzz the reconstructed SDK libraries (libgpu, libc, libapi, libetc, libcd, libspu, libcard, libpress, suzuki)
 # -Rebuild   recompile all game sources natively first (~1-2 min); done automatically when the flags change.
 # Needs: port\build\portable (run .\port\probe.ps1 first), extracted disc files (fft_decomp\build\extracted), Docker.
-param([int]$Trials = 40, [int]$From = 0, [int]$To = 100000, [switch]$AutoInit, [switch]$DivFix, [switch]$Sdk, [switch]$Rebuild, [string]$Replay = '', [string]$Cflags = '')
+param([int]$Trials = 40, [int]$From = 0, [int]$To = 100000, [switch]$AutoInit, [switch]$DivFix, [switch]$Sdk, [switch]$Rebuild, [string]$Replay = '', [string]$Cflags = '', [string]$Modules = 'main,battle')
 $root = Split-Path $PSScriptRoot -Parent
 $repo = Join-Path (Split-Path $root -Parent) 'fft_decomp'
-$nb   = Join-Path $root 'build\native'
+$modList = @($Modules -split '[,\s]+' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+if ($modList[0] -ne 'main') { $modList = @('main') + $modList }
+$yamls = @($modList | ForEach-Object { "$_.yaml" })
+$default = (($modList -join ',') -eq 'main,battle')
+$cfg = ''
+if (-not $default) { $cfg = 'fz_' + ($modList -join '_') }
+$nb = Join-Path $root 'build\native'
+$nbRel = '/port/build/native'
+$rhFile = Join-Path $root 'build\return_hazards.txt'
+if (-not $default) { $nb = Join-Path $nb $cfg; $nbRel = "$nbRel/$cfg"; $rhFile = Join-Path $root "build\return_hazards_$cfg.txt" }
 New-Item -ItemType Directory -Force $nb | Out-Null
-python (Join-Path $PSScriptRoot 'gen_symbols.py') $repo (Join-Path $nb 'symbols_pc.ld') --functions main.yaml battle.yaml | Out-Host
-python (Join-Path $PSScriptRoot 'gen_funcs.py') $repo (Join-Path $nb 'func_addrs.c') main.yaml battle.yaml | Out-Host
-python (Join-Path $PSScriptRoot 'gen_stubs.py') $repo (Join-Path $nb 'stub_table.c') --native-prefix=native_ main.yaml battle.yaml | Out-Host
+$info = python (Join-Path $PSScriptRoot 'gen_modinfo.py') $repo (Join-Path $nb 'module_files.c') @yamls
+$linked = @(($info | Where-Object { $_ -like 'links:*' } | Select-Object -First 1) -replace '^links:\s*', '' -split '\s+' | Where-Object { $_ } | ForEach-Object { '--data-only=' + $_ + '.yaml' })
+python (Join-Path $PSScriptRoot 'gen_symbols.py') $repo (Join-Path $nb 'symbols_pc.ld') --functions @linked @yamls | Out-Host
+python (Join-Path $PSScriptRoot 'gen_funcs.py') $repo (Join-Path $nb 'func_addrs.c') @yamls | Out-Host
+python (Join-Path $PSScriptRoot 'gen_stubs.py') $repo (Join-Path $nb 'stub_table.c') --native-prefix=native_ @yamls | Out-Host
+$dirs = (($info | Where-Object { $_ -like 'dirs:*' } | Select-Object -First 1) -replace '^dirs:\s*', '').Trim()
+if ($Sdk) { $dirs = "$dirs src/psyq/libgpu src/psyq/libc src/psyq/libapi src/psyq/libetc src/psyq/libcd src/psyq/libspu src/psyq/libcard src/psyq/libpress src/psyq/suzuki" }
 # functions that can fall off the end of a non-void function: their return value is unspecified (tools/return_hazards.sh)
-$rh = Join-Path $root 'build\return_hazards.txt'
-if (-not (Test-Path $rh)) {
-    docker run --rm --pull=never --volume "${root}:/port" fft-decomp-dev:local sh /port/tools/return_hazards.sh 2>$null | Set-Content -Path $rh
+if (-not (Test-Path $rhFile)) {
+    docker run --rm --pull=never -e "DIRS=$($dirs)" --volume "${root}:/port" fft-decomp-dev:local sh /port/tools/return_hazards.sh 2>$null | Set-Content -Path $rhFile
 }
-$rhNames = @(Get-Content $rh | Where-Object { $_ })
-$rhLines = @('/* generated by fuzz.ps1 from build/return_hazards.txt */', 'const char* const g_unspecified_ret[] = {') + ($rhNames | ForEach-Object { '    "' + $_ + '",' }) + @('    0', '};')
+$rhNames = @(Get-Content $rhFile | Where-Object { $_ })
+$rhLines = @('/* generated by fuzz.ps1 from the return-hazard list */', 'const char* const g_unspecified_ret[] = {') + ($rhNames | ForEach-Object { '    "' + $_ + '",' }) + @('    0', '};')
 [System.IO.File]::WriteAllText((Join-Path $nb 'unspecified_ret.c'), (($rhLines -join "`n") + "`n"))
 $sdkArg = @()
-$dirs = 'src/main src/battle'
-if ($Sdk) { $sdkArg = @('--sdk'); $dirs = 'src/main src/battle src/psyq/libgpu src/psyq/libc src/psyq/libapi src/psyq/libetc src/psyq/libcd src/psyq/libspu src/psyq/libcard src/psyq/libpress src/psyq/suzuki' }
-python (Join-Path $PSScriptRoot 'gen_fuzz.py') $repo $nb --native-prefix=native_ @sdkArg main.yaml battle.yaml | Out-Host
+if ($Sdk) { $sdkArg = @('--sdk') }
+python (Join-Path $PSScriptRoot 'gen_fuzz.py') $repo $nb --native-prefix=native_ @sdkArg @yamls | Out-Host
 $gameFlags = ''
 if ($AutoInit) { $gameFlags = '-ftrivial-auto-var-init=zero' }
 if ($Replay) {                                     # 'index,trial' or 'index,trial;index,trial;...'
@@ -36,18 +50,27 @@ if ($Replay) {                                     # 'index,trial' or 'index,tri
     [System.IO.File]::WriteAllText((Join-Path $nb 'replay_list.h'), (($pairs -join "`n") + "`n"))
     $Cflags = "$Cflags -DREPLAY_LIST_FILE"
 }
+# the hand-written-routine replacements of the modules in this build
+$repl = @('/port/native/replacements/main_asm.c')
+if ($modList -contains 'battle') { $repl += '/port/native/replacements/battle_asm.c', '/port/native/replacements/battle_asm2.c', '/port/native/replacements/battle_thread.c' }
+if ($modList -contains 'world') { $repl += '/port/native/replacements/world_asm.c', '/port/native/replacements/world_thread.c' }
+$replArg = $repl -join ' '
 $keyFile = Join-Path $nb 'all_pc\build_key.txt'
 $divfixEnv = ""
 if ($DivFix) { $divfixEnv = "1" }
 $repHash = (Get-FileHash (Join-Path $PSScriptRoot 'replacements\replaced.txt') -Algorithm MD5).Hash
-$key = "flags=$gameFlags divfix=$divfixEnv dirs=$dirs replaced=$repHash"
+$stampFile = Join-Path $root 'build\portable\.stamp'
+$stamp = ''
+if (Test-Path $stampFile) { $stamp = (Get-Content $stampFile -Raw).Trim() }
+$key = "flags=$gameFlags divfix=$divfixEnv dirs=$dirs replaced=$repHash tree=$stamp"
 $have = ''
 if (Test-Path $keyFile) { $have = (Get-Content $keyFile -Raw).Trim() }
 if ($Rebuild -or $have -ne $key) {
-    docker run --rm --pull=never -e "RENAME=1" -e "DIRS=$dirs" -e "DIVFIX=$divfixEnv" -e "OUT=/port/build/native/all_pc" -e "LDFILE=/port/build/native/symbols_pc.ld" -e "EXTRA_CFLAGS=$gameFlags" `
+    docker run --rm --pull=never -e "RENAME=1" -e "DIRS=$dirs" -e "DIVFIX=$divfixEnv" -e "OUT=$nbRel/all_pc" -e "LDFILE=$nbRel/symbols_pc.ld" -e "FN=$nbRel/fn_names.txt" -e "EXTRA_CFLAGS=$gameFlags" `
         --volume "${root}:/port" fft-decomp-dev:local sh /port/native/boundary.sh | Out-Host
+    New-Item -ItemType Directory -Force (Split-Path $keyFile -Parent) | Out-Null
     Set-Content -Path $keyFile -Value $key
 }
-docker run --rm --pull=never -e "DIVFIX=$divfixEnv" -e "EXTRA_CFLAGS=-DTRIALS=$Trials -DFROM=$From -DTO=$To $gameFlags $Cflags" `
+docker run --rm --pull=never -e "DIVFIX=$divfixEnv" -e "A=$nbRel/all_pc" -e "N=$nbRel" -e "REPL=$replArg" -e "EXTRA_CFLAGS=-DTRIALS=$Trials -DFROM=$From -DTO=$To $gameFlags $Cflags" `
     --volume "${root}:/port" --volume "$($repo)\build\extracted\files:/disc:ro" fft-decomp-dev:local `
     sh /port/native/build_run_fuzz.sh

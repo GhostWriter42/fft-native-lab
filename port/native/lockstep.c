@@ -64,39 +64,38 @@ static int streq(const char* a, const char* b) { while (*a && *a == *b) { a++; b
 extern unsigned g_bios_rand_seed;                                            /* bios_rt.c: the native BIOS services (rand, memset, strlen, ...) */
 
 /* ------------------------------------------------------------------------------------------------- tables */
-struct orig_func { const char* name; unsigned int addr; unsigned int size; };
-extern const struct orig_func g_orig_funcs[];
-extern const int g_orig_func_count;
-struct native_stub { unsigned int ps1_addr; unsigned int size; void* native; };
-extern const struct native_stub g_native_stubs[];
-extern const int g_native_stub_count;
+struct mfn { unsigned int addr; unsigned int size; void* native; const char* name; };          /* gen_modules.py: one row per function of a module */
+struct module { const char* name; const char* file; unsigned int lba, sectors, load; const struct mfn* fns; int nfns; };
+extern const struct module g_modules[];                                     /* [0] = the main executable, then the overlays */
+extern const int g_module_count;
 struct sym { unsigned int addr; const char* name; };
 extern const struct sym g_syms[];
 extern const int g_sym_count;
-extern const char* const g_hle_names[];
-extern const int g_hle_name_count;
-struct module_lba { const char* file; unsigned lba, sectors, load; const char* name; };
-extern const struct module_lba g_module_lbas[];
-extern const int g_module_lba_count;
+struct hle_module_names { const char* module; const char* const* names; int count; const unsigned char* arity; };      /* gen_hle.py: the functions the HLE takes over, per module */
+extern const struct hle_module_names g_hle_module_names[];
+extern const int g_hle_module_name_count;
 extern unsigned g_stub_calls;                                               /* generated with the stubs of the yaml functions that have no native definition */
 extern const char* const g_stub_names[];
 extern unsigned g_stub_hits[];
 extern const int g_stub_count;
 
-static const char* name_at(unsigned addr) {
+static int g_active[8], g_nactive;                                          /* the code overlays whose functions are installed (they occupy disjoint address ranges) */
+static unsigned addr_in(int mod, const char* name) {
     int i;
-    for (i = 0; i < g_orig_func_count; i++) if (g_orig_funcs[i].addr == addr) return g_orig_funcs[i].name;
+    for (i = 0; i < g_modules[mod].nfns; i++) if (streq(g_modules[mod].fns[i].name, name)) return g_modules[mod].fns[i].addr;
     return 0;
 }
-static unsigned addr_of(const char* name) {
+static unsigned addr_of(const char* name) { return addr_in(0, name); }     /* main-executable functions (the SDK entry points and main) */
+static const struct mfn* fn_at(unsigned pc, int module) {
     int i;
-    for (i = 0; i < g_orig_func_count; i++) if (streq(g_orig_funcs[i].name, name)) return g_orig_funcs[i].addr;
+    for (i = 0; i < g_modules[module].nfns; i++) { const struct mfn* f = &g_modules[module].fns[i]; if (pc >= f->addr && pc < f->addr + f->size) return f; }
     return 0;
 }
 static void func_at(unsigned pc) {
+    const struct mfn* f = fn_at(pc, 0);
     int i;
-    for (i = 0; i < g_orig_func_count; i++)
-        if (pc >= g_orig_funcs[i].addr && pc < g_orig_funcs[i].addr + g_orig_funcs[i].size) { out(g_orig_funcs[i].name); out("+0x"); outhex(pc - g_orig_funcs[i].addr); return; }
+    for (i = 0; !f && i < g_nactive; i++) f = fn_at(pc, g_active[i]);
+    if (f) { out(f->name); out("+0x"); outhex(pc - f->addr); return; }
     outhex(pc);
 }
 static void label(unsigned a) {
@@ -111,26 +110,51 @@ static void label(unsigned a) {
 static unsigned char interp_ram[0x200000];
 static r3k_t cpu;
 static unsigned data_lo[6000], data_hi[6000];
-static int ndata, n_installed;
+static int ndata;
 
-static void build_ranges_and_install(void) {
-    static unsigned idx[4096];
-    int i, j, n = g_native_stub_count;
+/* Data ranges = everything below the stack area that is not the code of a loaded module (the main executable and the active overlay). */
+static void build_ranges(void) {
+    static unsigned idx[8192];
+    int i, j, n = 0, m;
     unsigned cursor = 0x80000000u;
+    static const struct mfn* tab[8192];                                     /* static: an auto-initialised local array would call memset before the trampolines exist */
+    for (m = 0; m <= g_nactive; m++) {
+        int mod = m == 0 ? 0 : g_active[m - 1];
+        for (i = 0; i < g_modules[mod].nfns && n < 8192; i++) tab[n++] = &g_modules[mod].fns[i];
+    }
     for (i = 0; i < n; i++) idx[i] = (unsigned)i;
-    for (i = 1; i < n; i++) { unsigned v = idx[i]; for (j = i - 1; j >= 0 && g_native_stubs[idx[j]].ps1_addr > g_native_stubs[v].ps1_addr; j--) idx[j + 1] = idx[j]; idx[j + 1] = v; }
+    for (i = 1; i < n; i++) { unsigned v = idx[i]; for (j = i - 1; j >= 0 && tab[idx[j]]->addr > tab[v]->addr; j--) idx[j + 1] = idx[j]; idx[j + 1] = v; }
+    ndata = 0;
     for (i = 0; i < n; i++) {
-        const struct native_stub* f = &g_native_stubs[idx[i]];
-        if (f->ps1_addr >= 0x801f0000u) continue;
-        if (f->ps1_addr > cursor) { data_lo[ndata] = cursor; data_hi[ndata] = f->ps1_addr; ndata++; }
-        if (f->ps1_addr + f->size > cursor) cursor = f->ps1_addr + f->size;
-        if (f->native && f->size >= 5) {
-            unsigned char* p = (unsigned char*)f->ps1_addr;
-            p[0] = 0xe9; *(unsigned*)(p + 1) = (unsigned)f->native - (f->ps1_addr + 5);
-            n_installed++;
-        }
+        const struct mfn* f = tab[idx[i]];
+        if (f->addr >= 0x801f0000u) continue;
+        if (f->addr > cursor) { data_lo[ndata] = cursor; data_hi[ndata] = f->addr; ndata++; }
+        if (f->addr + f->size > cursor) cursor = f->addr + f->size;
     }
     if (cursor < 0x801f0000u) { data_lo[ndata] = cursor; data_hi[ndata] = 0x801f0000u; ndata++; }
+}
+/* x86 `jmp` trampolines at the PS1 addresses of a module's natively compiled functions; returns how many were installed */
+static int install_module(int mod) {
+    int i, n = 0;
+    for (i = 0; i < g_modules[mod].nfns; i++) {
+        const struct mfn* f = &g_modules[mod].fns[i];
+        if (f->native && f->size >= 5) {
+            unsigned char* p = (unsigned char*)f->addr;
+            p[0] = 0xe9; *(unsigned*)(p + 1) = (unsigned)f->native - (f->addr + 5);
+            n++;
+        }
+    }
+    return n;
+}
+/* the code bytes of the module that is going away come back from the interpreter's RAM (which holds whatever the game put there) */
+static void uninstall_module(int mod);
+static unsigned char interp_ram_bytes(unsigned a);
+static void uninstall_module(int mod) {
+    int i, k;
+    for (i = 0; i < g_modules[mod].nfns; i++) {
+        const struct mfn* f = &g_modules[mod].fns[i];
+        if (f->native && f->size >= 5) for (k = 0; k < 5; k++) ((unsigned char*)f->addr)[k] = interp_ram_bytes(f->addr + (unsigned)k);
+    }
 }
 /* words that legitimately differ: the retail thread switch saves registers into the thread records, the native scheduler keeps them
  * outside RAM; battle_thread_call_on_main_stack and the C runtime keep a saved $ra in RAM */
@@ -168,8 +192,10 @@ static int compare_ram(int show) {
         }
     return diffs;
 }
+static unsigned char interp_ram_bytes(unsigned a) { return interp_ram[a & 0x1fffff]; }
 static int compare_scratch(void) {
     int i, diffs = 0;
+    for (i = 0; i < g_nactive; i++) if (streq(g_modules[g_active[i]].name, "wldcore")) return 0;   /* WLDCORE runs its frame code on a stack IN the scratchpad (wldcore_switch_to_stack): the retail spills are not reproduced natively */
     for (i = 0; i < 256; i++) if (((unsigned*)0x1f800000u)[i] != ((unsigned*)cpu.scratch)[i]) diffs++;
     return diffs;
 }
@@ -188,16 +214,34 @@ static int read_sector(void* ctx, unsigned lba, unsigned char* dst) {
     for (k = 0; k < 2048; k++) dst[k] = raw[24 + k];
     return 1;
 }
-static int is_overlay_lba(void* ctx, unsigned lba) {
+static int module_at(unsigned lba) {                                        /* the overlay whose file starts at or contains this sector, else -1 */
     int i;
-    (void)ctx;
-    for (i = 0; i < g_module_lba_count; i++) if (lba >= g_module_lbas[i].lba && lba < g_module_lbas[i].lba + g_module_lbas[i].sectors) return 1;
-    return 0;
+    for (i = 1; i < g_module_count; i++) if (lba >= g_modules[i].lba && lba < g_modules[i].lba + g_modules[i].sectors) return i;
+    return -1;
 }
-static const struct module_lba* module_at(unsigned lba) {
+static int is_overlay_lba(void* ctx, unsigned lba) { (void)ctx; return module_at(lba) >= 0; }
+/* scripted controller input: {first frame, buttons}; the state holds until the next entry (-Pad in lockstep.ps1) */
+static const unsigned g_pad_script[][2] = {
+#include "pad_script.h"
+    , { 0xffffffffu, 0 } };
+static unsigned pad_at(unsigned frame) {
+    unsigned mask = 0;
     int i;
-    for (i = 0; i < g_module_lba_count; i++) if (lba >= g_module_lbas[i].lba && lba < g_module_lbas[i].lba + g_module_lbas[i].sectors) return &g_module_lbas[i];
-    return 0;
+    for (i = 0; g_pad_script[i][0] != 0xffffffffu; i++) if (g_pad_script[i][0] <= frame) mask = g_pad_script[i][1];
+    return mask;
+}
+/* symbols to watch: their (interpreter-side) 32-bit value is printed whenever it changes (-Watch in lockstep.ps1) */
+struct watch { unsigned addr; const char* name; };
+static const struct watch g_watch[] = {
+#include "watch.h"
+    { 0, 0 } };
+static unsigned g_watch_last[64];
+static void report_watch(int frame) {
+    int i;
+    for (i = 0; g_watch[i].addr && i < 64; i++) {
+        unsigned v = *(unsigned*)(interp_ram + (g_watch[i].addr & 0x1fffff));
+        if (v != g_watch_last[i] || frame == 1) { g_watch_last[i] = v; out("  [frame "); outnum(frame); out("] "); out(g_watch[i].name); out(" = 0x"); outhex(v); out("\n"); }
+    }
 }
 static int g_log_budget = LOG_LIMIT;
 static void log_call(void* ctx, const char* what, unsigned a0, unsigned a1, unsigned a2) {
@@ -211,34 +255,76 @@ static void ia_w8(void* c, unsigned a, unsigned v) { (void)c; interp_ram[a & 0x1
 static void ia_wb(void* c, unsigned a, const unsigned char* s, unsigned n) { unsigned k; (void)c; for (k = 0; k < n; k++) interp_ram[(a + k) & 0x1fffff] = s[k]; }
 static unsigned ia_call(void* c, unsigned addr, unsigned a0, unsigned a1) { unsigned args[2]; (void)c; args[0] = a0; args[1] = a1; return r3k_call_nested(&cpu, addr, args, 2, 5000000ull); }
 static void ia_frame(void* c) { (void)c; hle_i.stop = 1; }
-static struct { unsigned addr; const char* name; } g_hooks[512];
+extern const unsigned g_hle_untraced[];                                      /* gen_hle.py: [lo, hi) address ranges of natively replaced SDK libraries */
+static int untraced_caller(unsigned ra) {
+    int i;
+    for (i = 0; g_hle_untraced[i] || g_hle_untraced[i + 1]; i += 2) if (ra >= g_hle_untraced[i] && ra < g_hle_untraced[i + 1]) return 1;
+    return 0;
+}
+static struct { unsigned addr; const char* name; int module; int arity; } g_hooks[1024];
 static int n_hooks;
 static unsigned g_main_addr;
 static int g_at_main;
+static void unhook(unsigned addr);
+#ifdef SCENARIO_TITLE
+/* Scenario "title": the game loop decides at the top of every iteration whether OPEN plays the opening movie (result != 5) or goes straight
+ * to the title menu (5 = "coming back from the world map"). Both machines run main_item_init_new_game_inventory as usual and then the
+ * driver stores 5 into g_main_system_frontend_world_result, i.e. steers the game past the FMV (whose streaming hardware is not modelled). */
+#define SCENARIO_FN "main_item_init_new_game_inventory"
+#define SCENARIO_WORD 0x80045978u
+#define SCENARIO_VALUE 5u
+static unsigned g_scn_addr;
+static int g_scn_active;
+#endif
 static int interp_hle(r3k_t* c, unsigned addr) {
-    int i;
+    int i, arity = 4;
     const char* n = 0;
     if (addr == g_main_addr) { g_at_main = 1; return 1; }                    /* stop at the entry of main() without running it */
-    for (i = 0; i < n_hooks; i++) if (g_hooks[i].addr == addr) { n = g_hooks[i].name; break; }
-    c->r[2] = hle_call(&hle_i, n ? n : "?", c->r[4], c->r[5], c->r[6], c->r[7]);
+#ifdef SCENARIO_TITLE
+    if (addr == g_scn_addr && g_scn_addr) {                                  /* run the original function, then poke */
+        unsigned args[4];
+        args[0] = c->r[4]; args[1] = c->r[5]; args[2] = c->r[6]; args[3] = c->r[7];
+        unhook(addr);
+        c->r[2] = r3k_call_nested(c, addr, args, 4, 5000000ull);
+        r3k_hle_add(c, addr);
+        interp_ram[SCENARIO_WORD & 0x1fffff] = SCENARIO_VALUE; interp_ram[(SCENARIO_WORD & 0x1fffff) + 1] = 0; interp_ram[(SCENARIO_WORD & 0x1fffff) + 2] = 0; interp_ram[(SCENARIO_WORD & 0x1fffff) + 3] = 0;
+        return 0;
+    }
+#endif
+    for (i = 0; i < n_hooks; i++) if (g_hooks[i].addr == addr) { n = g_hooks[i].name; arity = g_hooks[i].arity; break; }
+    hle_i.no_trace = untraced_caller(c->r[31]);                              /* an HLE call made from inside the (natively replaced) libgte is not compared */
+    c->r[2] = hle_call(&hle_i, n ? n : "?", (unsigned)arity, c->r[4], c->r[5], c->r[6], c->r[7]);
+    hle_i.no_trace = 0;
     return hle_i.stop;
 }
-static void install_hle_hooks(void) {
-    int i;
-    for (i = 0; i < g_hle_name_count && n_hooks < 512; i++) {
-        unsigned a = addr_of(g_hle_names[i]);
-        if (a) { g_hooks[n_hooks].addr = a; g_hooks[n_hooks].name = g_hle_names[i]; n_hooks++; r3k_hle_add(&cpu, a); }
-    }
-    r3k_hle_add(&cpu, g_main_addr);
-}
 static void unhook(unsigned addr) { unsigned w = (addr & 0x1fffffu) >> 2; cpu.hle_bitmap[w >> 3] &= (unsigned char)~(1u << (w & 7)); }
+/* the interpreter intercepts the ORIGINAL entry addresses of the functions the HLE takes over, only while their module is loaded
+ * (an overlay's addresses hold other code before and after) */
+static int install_hle_hooks(int mod) {
+    int j, i, n = 0;
+    for (j = 0; j < g_hle_module_name_count; j++) {
+        if (!streq(g_hle_module_names[j].module, g_modules[mod].name)) continue;
+        for (i = 0; i < g_hle_module_names[j].count && n_hooks < 1024; i++) {
+            unsigned a = addr_in(mod, g_hle_module_names[j].names[i]);
+            if (a) { g_hooks[n_hooks].addr = a; g_hooks[n_hooks].name = g_hle_module_names[j].names[i]; g_hooks[n_hooks].module = mod; g_hooks[n_hooks].arity = g_hle_module_names[j].arity[i]; n_hooks++; r3k_hle_add(&cpu, a); n++; }
+        }
+    }
+    return n;
+}
+static void remove_hle_hooks(int mod) {
+    int i, k = 0;
+    for (i = 0; i < n_hooks; i++) {
+        if (g_hooks[i].module == mod) unhook(g_hooks[i].addr);
+        else g_hooks[k++] = g_hooks[i];
+    }
+    n_hooks = k;
+}
 
 /* --------------------------------------------------------------------------------- machine B: the native game */
 hle_t g_hle_native;
 extern void native_main(void);
 static void* g_driver_esp;
 static void* g_game_esp;
-static unsigned char g_game_stack[1 << 20] __attribute__((aligned(16)));
 static int g_native_dead;
 void ls_switch(void** save_esp, void* new_esp);
 __asm__(".text\n"
@@ -268,12 +354,18 @@ static void nb_wb(void* c, unsigned a, const unsigned char* s, unsigned n) { uns
 static unsigned nb_call(void* c, unsigned addr, unsigned a0, unsigned a1) { (void)c; return ((unsigned (*)(unsigned, unsigned))addr)(a0, a1); }
 static void nb_frame(void* c) { (void)c; ls_switch(&g_game_esp, g_driver_esp); }
 static void start_native_game(void) {
-    unsigned* top = (unsigned*)(g_game_stack + sizeof g_game_stack);
+    /* the game's stack lives in the RAM image, at the top like the console's: locals whose addresses go into GPU ordering tables / RAM structures keep valid 24-bit PS1 addresses */
+    unsigned* top = (unsigned*)0x80200000u;
     top -= 5;
     *--top = (unsigned)game_entry;
     *--top = 0; *--top = 0; *--top = 0; *--top = 0;
     g_game_esp = top;
 }
+
+#ifdef SCENARIO_TITLE
+extern void native_main_item_init_new_game_inventory(void);
+static void scn_wrapper(void) { native_main_item_init_new_game_inventory(); *(volatile unsigned*)SCENARIO_WORD = SCENARIO_VALUE; }
+#endif
 
 /* -------------------------------------------------------------------------- crash report for the native side */
 static const char* g_where = "before main";
@@ -315,6 +407,33 @@ static int run_orig(void) {                                                 /* -
     gte_of[0] = g_gte;
     return hle_i.stop ? hle_i.sync_reason : 0;
 }
+/* compare the calls the two machines made into the HLE this frame (the platform-layer traffic) */
+static void print_trace_entry(const hle_trace_entry_t* e) {
+    out(e->name); out("("); outhex(e->a[0]); out(", "); outhex(e->a[1]); out(", "); outhex(e->a[2]); out(", "); outhex(e->a[3]); out(") pointee-hash "); outhex(e->a[4]);
+}
+static int compare_traces(void) {
+    unsigned i, n = hle_i.trace_n < g_hle_native.trace_n ? hle_i.trace_n : g_hle_native.trace_n;
+    for (i = 0; i < n; i++) {
+        const hle_trace_entry_t* x = &g_hle_native.trace[i];
+        const hle_trace_entry_t* y = &hle_i.trace[i];
+        int k, same = streq(x->name, y->name);
+        for (k = 0; k < 5; k++) if (x->a[k] != y->a[k]) same = 0;
+        if (!same) {
+            unsigned c0 = i > 8 ? i - 8 : 0, c;
+            for (c = c0; c < i; c++) { out("    #"); outnum(c); out(" (both) "); print_trace_entry(&hle_i.trace[c]); out("\n"); }
+            out("  HLE call #"); outnum(i); out(" differs:\n    native   "); print_trace_entry(x); out("\n    original "); print_trace_entry(y); out("\n");
+            return 1;
+        }
+    }
+    if (hle_i.trace_n != g_hle_native.trace_n) {
+        out("  the machines made a different number of HLE calls: native "); outnum(g_hle_native.trace_n); out(", original "); outnum(hle_i.trace_n);
+        if (i < hle_i.trace_n) { out("; original's next: "); print_trace_entry(&hle_i.trace[i]); }
+        if (i < g_hle_native.trace_n) { out("; native's next: "); print_trace_entry(&g_hle_native.trace[i]); }
+        out("\n");
+        return 1;
+    }
+    return 0;
+}
 static void report_stubs(void) {
     int i, n = 0;
     for (i = 0; i < g_stub_count; i++) if (g_stub_hits[i]) n++;
@@ -333,7 +452,11 @@ static int main_test(void) {
     /* --- run the ORIGINAL from the entry point to main() --- */
     g_main_addr = addr_of("main");
     cpu.hle = interp_hle;
-    install_hle_hooks();
+    install_hle_hooks(0);
+    r3k_hle_add(&cpu, g_main_addr);
+#ifdef SCENARIO_TITLE
+    if (g_scn_addr) r3k_hle_add(&cpu, g_scn_addr);
+#endif
     cpu.r[29] = 0x801fff00u;
     cpu.pc = addr_of("__SN_ENTRY_POINT"); cpu.npc = cpu.pc + 4;
     g_orig_rc = r3k_run(&cpu, STEP_BUDGET);
@@ -348,6 +471,8 @@ static int main_test(void) {
 
     /* --- frame by frame --- */
     for (frame = 1; frame <= MAX_FRAMES; frame++) {
+        g_hle_native.pad_mask = hle_i.pad_mask = pad_at((unsigned)frame);                  /* both machines see the same controller */
+        hle_i.trace_n = g_hle_native.trace_n = 0; hle_i.trace_lost = g_hle_native.trace_lost = 0;
         rn = run_native();
         if (rn < 0) { out("native main() returned before frame "); outnum(frame); out("\n"); return 1; }
         ro = run_orig();
@@ -355,6 +480,7 @@ static int main_test(void) {
         g_where = ro == HLE_SYNC_OVERLAY ? "overlay load" : "VSync";
         if (rn != ro) { out("FRAME "); outnum(frame); out(": the machines synced for different reasons: native "); outnum(rn); out(", original "); outnum(ro); out("\n"); report_stubs(); return 2; }
         diffs = compare_ram(0);
+        if (compare_traces()) { out("FRAME "); outnum(frame); out(": the machines' calls into the HLE differ (RAM differs in "); outnum(diffs); out(" words)\n"); if (diffs) compare_ram(SHOW_DIFFS); report_stubs(); return 2; }
         if (diffs || compare_scratch()) {
             out("FRAME "); outnum(frame); out(": RAM differs in "); outnum(diffs); out(" words (native vs original)"); if (compare_scratch()) out(" and in the scratchpad"); out("; first ones:\n");
             compare_ram(SHOW_DIFFS);
@@ -364,14 +490,25 @@ static int main_test(void) {
             return 2;
         }
         if (ro == HLE_SYNC_OVERLAY) {
-            const struct module_lba* m = module_at(hle_i.sync_arg2);
-            out("frame "); outnum(frame); out(": the game loads a code overlay ("); out(m ? m->file : "?"); out(", "); outnum(hle_i.sync_arg1); out(" sectors at LBA "); outnum(hle_i.sync_arg2);
-            out(" -> 0x"); outhex(hle_i.sync_arg0); out(") -- RAM identical up to here; original steps "); outnum((long)cpu.steps); out("\n");
+            int mi = module_at(hle_i.sync_arg2), k, j, installed;
+            out("frame "); outnum(frame); out(": the game loads a code overlay ("); out(mi >= 0 ? g_modules[mi].file : "?"); out(", "); outnum(hle_i.sync_arg1); out(" sectors at LBA "); outnum(hle_i.sync_arg2);
+            out(" -> 0x"); outhex(hle_i.sync_arg0); out("); RAM identical; original steps "); outnum((long)cpu.steps); out("\n");
             if (g_hle_native.sync_arg0 != hle_i.sync_arg0 || g_hle_native.sync_arg1 != hle_i.sync_arg1 || g_hle_native.sync_arg2 != hle_i.sync_arg2) { out("BUT the two machines asked for different reads\n"); return 2; }
-            report_stubs();
-            return 0;
-        }
+            /* the new module evicts every active module whose address range it overlaps */
+            for (k = 0; k < g_nactive; k++) {
+                const struct module* a = &g_modules[g_active[k]];
+                unsigned alo = a->load, ahi = a->load + a->sectors * 2048u, blo = g_modules[mi].load, bhi = g_modules[mi].load + g_modules[mi].sectors * 2048u;
+                if (alo < bhi && blo < ahi) { uninstall_module(g_active[k]); remove_hle_hooks(g_active[k]); for (j = k; j + 1 < g_nactive; j++) g_active[j] = g_active[j + 1]; g_nactive--; k--; }
+            }
+            g_active[g_nactive++] = mi;
+            installed = install_module(mi);
+            j = install_hle_hooks(mi);
+            build_ranges();
+            out("  module "); out(g_modules[mi].name); out(": "); outnum(installed); out(" of "); outnum(g_modules[mi].nfns); out(" functions have native code, "); outnum(j); out(" taken over by the HLE; "); outnum(ndata); out(" data ranges compared from now on\n");
+            if (!installed) { out("  no native code for this module -- stopping (the machines agreed up to here)\n"); report_stubs(); return 0; }
+        } else
         if (g_hle_native.frame_counter != hle_i.frame_counter || g_hle_native.cd_reads != hle_i.cd_reads) { out("FRAME "); outnum(frame); out(": VSync/CD counters differ\n"); return 2; }
+        report_watch(frame);
         if (frame % 25 == 0 || frame == 1) {
             out("frame "); outnum(frame); out(": RAM identical ("); outnum(ndata); out(" data ranges; original steps "); outnum((long)cpu.steps); out(", CD reads "); outnum(hle_i.cd_reads); out(", stub calls "); outnum(g_stub_calls); out(")\n");
         }
@@ -384,17 +521,26 @@ static int main_test(void) {
 
 void _start(void) {
     int bad;
-    long n;
+    long n, n_tramp;
     if (!map_fixed(0x80000000u, 0x200000u)) { out("mmap of the RAM image FAILED\n"); sys3(1, 1, 0, 0); }
     map_fixed(0x1f800000u, 0x1000u);                                         /* scratchpad (the native game may use it); I/O registers stay unmapped: a touch is a crash report */
     install_fault_handlers();
     n = load_file("/disc/SCUS_942.21", (unsigned char*)0x8000f800u);
+    build_ranges();
+    n_tramp = install_module(0);                                              /* first: compiler-generated calls to memset/memcpy resolve to PS1 addresses (trampolines) */
     load_file("/disc/SCUS_942.21", interp_ram + (0x8000f800u & 0x1fffff));
     out("SCUS_942.21: "); outnum(n); out(" bytes\n");
     g_disc_fd = (int)sys3(5, (long)"/disc.bin", 0, 0);
     r3k_reset(&cpu, interp_ram);
-    build_ranges_and_install();                                               /* trampolines go into the native image only */
-    outnum(n_installed); out(" trampolines, "); outnum(ndata); out(" data ranges compared\n");
+    outnum(n_tramp); out(" trampolines of the main executable (native image only), "); outnum(ndata); out(" data ranges compared\n");
+#ifdef SCENARIO_TITLE
+    g_scn_addr = addr_of(SCENARIO_FN);
+    if (g_scn_addr) {                                                         /* point the trampoline of that function at the wrapper */
+        unsigned char* tp = (unsigned char*)g_scn_addr;
+        tp[0] = 0xe9; *(unsigned*)(tp + 1) = (unsigned)scn_wrapper - (g_scn_addr + 5);
+        out("scenario title: main_item_init_new_game_inventory will set g_main_system_frontend_world_result = 5 on both machines\n");
+    }
+#endif
     gte_reset();
     bad = main_test();
     sys3(1, bad, 0, 0);

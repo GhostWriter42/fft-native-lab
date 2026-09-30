@@ -5,11 +5,12 @@
  * Function numbers (A table): strcat 0x15, strcmp 0x17, strcpy 0x19, strlen 0x1b, bcopy 0x27, bzero 0x28, memcpy 0x2a, memset 0x2b,
  * memchr 0x2e, rand 0x2f, srand 0x30. The yaml names of the veneers are the SDK names (memcpy's is psyq_api_memcpy). */
 
-unsigned g_bios_rand_seed = 1;
+unsigned g_bios_rand_seed = 1, g_bios_rand_calls;
 
 int abs(int x) { return x < 0 ? -x : x; }                                     /* the game's C code calls it (-fno-builtin keeps it a real call) */
 
 int native_rand(void) {
+    g_bios_rand_calls++;
     g_bios_rand_seed = g_bios_rand_seed * 1103515245u + 12345u;
     return (int)((g_bios_rand_seed >> 16) & 0x7fffu);
 }

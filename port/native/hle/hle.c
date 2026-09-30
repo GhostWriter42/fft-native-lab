@@ -28,9 +28,64 @@ static void cd_read(hle_t* h, unsigned lba, unsigned count, unsigned dst) {
     h->cd_sectors += count;
 }
 
-unsigned hle_call(hle_t* h, const char* n, unsigned a0, unsigned a1, unsigned a2, unsigned a3) {
-    (void)a3;
+static unsigned fnv(hle_t* h, unsigned addr, unsigned len) {
+    unsigned x = 2166136261u;
+    while (len--) x = (x ^ h->p.r8(h->p.ctx, addr++)) * 16777619u;
+    return x;
+}
+static unsigned rd32(hle_t* h, unsigned addr) {
+    return h->p.r8(h->p.ctx, addr) | (h->p.r8(h->p.ctx, addr + 1) << 8) | (h->p.r8(h->p.ctx, addr + 2) << 16) | (h->p.r8(h->p.ctx, addr + 3) << 24);
+}
+/* a GPU ordering table by CONTENT: every packet on the chain (its length and words), never the addresses (the two machines' stacks differ) */
+static unsigned hash_ot(hle_t* h, unsigned ot) {
+    unsigned x = 2166136261u, addr = ot, guard = 0;
+    while (guard++ < 200000) {
+        unsigned tag = rd32(h, addr), len = tag >> 24, next = tag & 0x00ffffffu, k;
+        x = (x ^ len) * 16777619u;
+        for (k = 1; k <= len && k < 64; k++) x = (x ^ rd32(h, addr + 4 * k)) * 16777619u;
+        if (next == 0x00ffffffu) break;
+        addr = 0x80000000u | next;
+    }
+    return x;
+}
+/* what the call looks like to a comparison: pointers to structures the caller owns are replaced by a hash of their contents */
+static void trace_call(hle_t* h, const char* n, unsigned a0, unsigned a1, unsigned a2, unsigned a3) {
+    hle_trace_entry_t* e;
+    /* interrupt masking has no platform-visible effect, and the natively replaced libgte (InitGeom & co.) does not perform the critical sections
+     * the original SDK code does: not part of the comparison */
+    if (streq(n, "EnterCriticalSection") || streq(n, "ExitCriticalSection") || h->no_trace) return;
+    if (h->trace_n >= HLE_TRACE_MAX) { h->trace_lost++; return; }
+    e = &h->trace[h->trace_n++];
+    e->name = n; e->a[0] = a0; e->a[1] = a1; e->a[2] = a2; e->a[3] = a3; e->a[4] = 0;
+    /* the two machines' stacks differ in frame layout: a pointer to a stack local compares as "some stack address" (its contents are hashed below where they matter) */
+    { int k; for (k = 0; k < 4; k++) if (e->a[k] >= 0x801f0000u && e->a[k] < 0x80200000u) e->a[k] = 0x801f0000u; }
+    if (streq(n, "SpuSetReverbModeParam") || streq(n, "SpuSetReverbDepth")) e->a[4] = fnv(h, a0, 0x14);
+    else if (streq(n, "SpuSetCommonAttr")) e->a[4] = fnv(h, a0, 0x28);
+    else if (streq(n, "SpuSetVoiceAttr")) e->a[4] = fnv(h, a0, 0x40);
+    if (e->a[4]) { }
+    else if (streq(n, "LoadImage") || streq(n, "StoreImage") || streq(n, "ClearImage") || streq(n, "MoveImage")) { e->a[4] = fnv(h, a0, 8); e->a[0] = 0; }        /* RECT */
+    else if (streq(n, "DrawOTag")) { e->a[4] = hash_ot(h, a0); e->a[0] = 0; }
+    else if (streq(n, "PutDispEnv")) { e->a[4] = fnv(h, a0, 20); e->a[0] = 0; }                                                                           /* DISPENV */
+    else if (streq(n, "PutDrawEnv")) { e->a[4] = fnv(h, a0, 28); e->a[0] = 0; }                                                                           /* DRAWENV without its DR_ENV packet */
+    else if (streq(n, "CdControl") || streq(n, "CdControlB") || streq(n, "CdControlF")) {                                                             /* command, its parameter bytes, result buffer given? */
+        unsigned len = 0, cmd = a0 & 0xff;
+        if (cmd == 0x02) len = 3;                                                                                                                        /* CdlSetloc: minute, second, sector (BCD) */
+        else if (cmd == 0x0d) len = 2;                                                                                                                   /* CdlSetfilter: file, channel */
+        else if (cmd == 0x0e || cmd == 0x03 || cmd == 0x12) len = 1;                                                                                     /* CdlSetmode, CdlPlay track, CdlSetsession */
+        if (a1 && len) e->a[4] = fnv(h, a1, len);
+        e->a[1] = a1 != 0; e->a[2] = a2 != 0;
+    }
+    else if (streq(n, "CdSync") || streq(n, "CdIntToPos")) { e->a[1 + (streq(n, "CdSync") ? 0 : 0)] = a1 != 0; }
+    else if (streq(n, "CdPosToInt")) { e->a[4] = fnv(h, a0, 4); e->a[0] = 0; }
+}
+
+unsigned hle_call(hle_t* h, const char* n, unsigned nargs, unsigned a0, unsigned a1, unsigned a2, unsigned a3) {
+    if (nargs < 4) a3 = 0;                                                      /* registers beyond the function's parameters carry whatever the caller left there */
+    if (nargs < 3) a2 = 0;
+    if (nargs < 2) a1 = 0;
+    if (nargs < 1) a0 = 0;
     h->calls++;
+    trace_call(h, n, a0, a1, a2, a3);
     if (streq(n, "VSync")) {
         if ((int)a0 == 0) {                                                     /* wait for the next vertical blank: run the game's own callback once */
             h->frame_counter++;
@@ -71,19 +126,25 @@ unsigned hle_call(hle_t* h, const char* n, unsigned a0, unsigned a1, unsigned a2
         return 1;
     }
     if (streq(n, "CdRead")) {
-        if (h->p.is_overlay && h->p.is_overlay(h->p.ctx, h->cd_lba)) {         /* code overlay: hand over BEFORE the machine code lands in RAM */
-            h->sync_reason = HLE_SYNC_OVERLAY; h->sync_arg0 = a1; h->sync_arg1 = a0; h->sync_arg2 = h->cd_lba; h->stop = 1;
-            if (h->p.frame) h->p.frame(h->p.ctx);
-            return 1;
-        }
         log_call(h, n, a0, a1, a2);
         cd_read(h, h->cd_lba, a0, a1);
         if (h->cb_cd_read) h->p.call(h->p.ctx, h->cb_cd_read, 1, 0);           /* CdlComplete */
+        if (h->p.is_overlay && h->p.is_overlay(h->p.ctx, h->cd_lba)) {         /* a code overlay has landed in RAM: hand over so that the driver can switch modules */
+            h->sync_reason = HLE_SYNC_OVERLAY; h->sync_arg0 = a1; h->sync_arg1 = a0; h->sync_arg2 = h->cd_lba; h->stop = 1;
+            if (h->p.frame) h->p.frame(h->p.ctx);
+        }
         return 1;
     }
     if (streq(n, "CdSync")) { if (a1) h->p.w8(h->p.ctx, a1, 0x02); return 2; }
     if (streq(n, "CdReadSync")) return 0;
-    if (streq(n, "DrawSync") || streq(n, "PadRead") || streq(n, "TestEvent")) return 0;
+    if (streq(n, "_otc")) {                                                    /* ClearOTagR's DMA channel 6: link ot[count-1] -> ... -> ot[0] (the chain runs from the highest entry down) */
+        unsigned i;
+        for (i = a1; i-- > 1;) { unsigned link = (a0 + 4 * (i - 1)) & 0x00ffffffu, b; for (b = 0; b < 4; b++) h->p.w8(h->p.ctx, a0 + 4 * i + b, (link >> (8 * b)) & 0xff); }
+        if (a1) { unsigned b; for (b = 0; b < 4; b++) h->p.w8(h->p.ctx, a0 + b, b == 3 ? 0x00 : 0xff); }
+        return a1;
+    }
+    if (streq(n, "PadRead")) return h->pad_mask;                                 /* the scripted controller state (PSX_PAD_*: START 0x800, CROSS 0x40, CIRCLE 0x20, ...) */
+    if (streq(n, "DrawSync") || streq(n, "TestEvent")) return 0;
     log_call(h, n, a0, a1, a2);
     return 0;
 }

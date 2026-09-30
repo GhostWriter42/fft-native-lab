@@ -19,6 +19,12 @@ typedef struct hle_platform {
     int (*is_overlay)(void* ctx, unsigned lba);                                 /* optional: 1 if a read starting at this sector loads a CODE overlay (the driver syncs first) */
 } hle_platform_t;
 
+/* A log of the calls a machine made into the HLE, in order (the platform-layer traffic: what a renderer / audio backend would be asked to do).
+ * Arguments that are pointers to caller-local structures are logged by CONTENT (RECT, DISPENV, DRAWENV, CdlLOC ...) so that two machines with different
+ * stacks can be compared; everything else by value. The lockstep driver clears it every frame and compares the two machines' logs. */
+#define HLE_TRACE_MAX 8192
+typedef struct hle_trace_entry { const char* name; unsigned a[5]; } hle_trace_entry_t;     /* a[4] = hash of the pointee of the first pointer argument (0 if none) */
+
 typedef struct hle {
     hle_platform_t p;
     unsigned frame_counter;
@@ -30,12 +36,17 @@ typedef struct hle {
     /* Why the machine handed control to the comparison driver (p.frame was called): */
     int sync_reason;                                                            /* HLE_SYNC_VSYNC or HLE_SYNC_OVERLAY */
     unsigned sync_arg0, sync_arg1, sync_arg2;                                   /* overlay load: destination address, sector count, first sector */
+    hle_trace_entry_t trace[HLE_TRACE_MAX];                                     /* this frame's HLE calls */
+    unsigned trace_n, trace_lost;
+    int no_trace;                                                               /* set by the driver around calls that must not be logged */                                               /* entries in use / calls that did not fit */
+    unsigned pad_mask;                                                          /* controller 1 buttons as PadRead() returns them (set by the driver's input script) */
 } hle_t;
 enum { HLE_SYNC_NONE = 0, HLE_SYNC_VSYNC = 1, HLE_SYNC_OVERLAY = 2 };
 
 void hle_init(hle_t* h, const hle_platform_t* p);
-/* Perform the SDK function `name` with the guest's first four arguments; returns $v0. Unknown names are logged and return 0. */
-unsigned hle_call(hle_t* h, const char* name, unsigned a0, unsigned a1, unsigned a2, unsigned a3);
+/* Perform the SDK function `name` (it takes `nargs` parameters: the guest's other argument registers hold garbage and are zeroed) with the guest's first
+ * four arguments; returns $v0. Unknown names are logged and return 0. */
+unsigned hle_call(hle_t* h, const char* name, unsigned nargs, unsigned a0, unsigned a1, unsigned a2, unsigned a3);
 
 /* The names the HLE takes over (everything the game reaches in libspu / libetc / libcd / libcard, the BIOS event API and the
  * hardware-facing libgpu entry points). X(name) is expanded once per name. */
@@ -43,6 +54,13 @@ unsigned hle_call(hle_t* h, const char* name, unsigned a0, unsigned a1, unsigned
     X(ResetGraph) X(SetGraphDebug) X(DrawSync) X(DrawSyncCallback) X(PutDispEnv) X(PutDrawEnv) X(DrawOTag) X(DrawPrim) \
     X(LoadImage) X(StoreImage) X(MoveImage) X(ClearImage) X(SetDispMask) X(GetGraphType) \
     X(OpenEvent) X(CloseEvent) X(EnableEvent) X(DisableEvent) X(TestEvent) X(WaitEvent) X(DeliverEvent) X(UnDeliverEvent) \
-    X(EnterCriticalSection) X(ExitCriticalSection) X(SetMem) X(PadInit) X(PadRead) X(PadStop)
+    X(EnterCriticalSection) X(ExitCriticalSection) X(SetMem) X(PadInit) X(PadRead) X(PadStop) X(_otc)
+
+/* Hand-written RENDER-ONLY routines of the overlays (they only build pixel images and GPU packets that the renderer consumes). The lockstep
+ * skips them on BOTH machines (the interpreter never runs the original bytes, the native side gets a no-op), so the rest of the game can be
+ * compared without transliterating them first; their native versions are a separate verification job (harness_diff_asm.c). */
+#define HLE_SKIP_NAMES(X) \
+    X(battle_map_queue_textured_triangles) X(battle_map_queue_textured_quads) X(battle_map_queue_untextured_triangles) X(battle_map_queue_untextured_quads) \
+    X(blit_text_glyph) X(battle_text_render_glyph_to_4bpp_image) X(world_text_blit_glyph) X(world_text_blit_font_glyph_to_4bpp)
 
 #endif
