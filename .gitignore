@@ -1,0 +1,10 @@
+# Big / third-party / generated -- never part of this repo
+/game/
+/fft_decomp/
+/fft_sweep/
+/port/build/
+*.bin
+*.iso
+*.img
+__pycache__/
+*.pyc

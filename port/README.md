@@ -1,0 +1,37 @@
+# port/ — groundwork for a native (HD / multiplayer-capable) build, plus asset tools
+
+Nothing here modifies `fft_decomp`. Generated output goes to `port\build\` (about 120 MB; safe to delete, everything regenerates).
+Numbers and design notes: `..\PORT-FEASIBILITY.md`; plan: `..\ROADMAP.md`. Needs Docker Desktop running (image `fft-decomp-dev:local`)
+and host Python 3 (Pillow for the image tools).
+
+## Run these
+
+| Command | What it does |
+|---|---|
+| `.\port\probe.ps1 [-Baseline]` | snapshot HEAD of `fft_decomp`, run `portify.py`, compile every file with `gcc -m32`, print pass rate + error histogram (**must run first**: it creates `build\portable`) |
+| `.\port\hazards.ps1` | same tree with `-O2` + undefined-behaviour warnings -> `HAZARDS.md` |
+| `.\port\native\zodiac.ps1` | native spike 1: the zodiac-compatibility formula over all sign pairings |
+| `.\port\native\ram.ps1` | native spike 2: PS1 RAM image at `0x80000000`; weapon XA for every weapon in the real item table |
+| `.\port\native\attack.ps1` | native spike 3: a full weapon attack (evade/hit/crit/zodiac/damage) with 244 game functions, 0 stubs |
+| `.\port\native\recon.ps1 -Sources …` | which external functions does a set of sources still need? |
+| `.\port\native\closure.ps1 -Sources … [-Harness x.c]` | grow a slice until it links (auto-adds sources of unresolved functions), optionally link + run a harness |
+
+## Tools (`tools\`)
+
+| Tool | Purpose |
+|---|---|
+| `portify.py` | build-time transform: strips MIPS register pins and empty asm barriers, turns *assigning* asm ties into assignments, macro-izes conflicting volatile views, reports real asm |
+| `hazards.py`, `closure.py`, `memmap.py`, `voidable.py` | analyses (UB warnings, name-based call closure, RAM layout by symbol prefix, never-returns-a-value functions) |
+| `spr2png.py`, `sprites_all.py` | decode unit sprite sheets (`.SPR`) to PNG; all 138 + a contact sheet |
+| `shp_frames.py` | assemble frames from a sheet using a `.SHP` frame table; `--json` dumps every frame's part rectangles |
+| `sprite_upscale_demo.py` | index-space Scale2x: upscaling that keeps the game's palette swaps working |
+
+`native\` also holds the harnesses (`harness_*.c`), the container build scripts, `gen_symbols.py` (linker-script symbols from `target\*.yaml`),
+`decode_handlers.py` (function-pointer table -> native table) and the saved outputs (`OUTPUT-*.txt`).
+`samples\` has three decoded/derived images from your disc (local only).
+
+## Next milestones (see ROADMAP.md)
+
+1. Software GTE + libgte API + BIOS shim (so the last 70 game files compile).
+2. One native module per overlay with its own symbol map; boot -> title -> world -> battle with a null renderer.
+3. A renderer, audio, then HD assets and netcode.
