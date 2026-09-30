@@ -36,7 +36,9 @@ typedef struct r3k {
     void (*call_hook)(struct r3k* c, unsigned int target);  /* optional: called when a traced jump target is REACHED (after its delay slot ran) */
     unsigned int pending_call;          /* jump target waiting for its delay slot to finish */
     unsigned int ncode, code_lo[4096], code_hi[4096];   /* optional sorted code ranges: data loads from them are counted in code_reads */
-    unsigned int code_reads;
+    unsigned int code_reads, code_writes;
+    unsigned int wild;                  /* data accesses that a native build cannot reach: KUSEG/KSEG1 aliases, mirrors above 2 MiB, scratchpad */
+    unsigned int nsdk, sdk_lo[16], sdk_hi[16], sdk_hits;   /* optional SDK ranges: calls/jumps into them are counted */
 } r3k_t;
 
 enum { R3K_OK = 0, R3K_FAULT_BAD_FETCH = 1, R3K_FAULT_UNSUPPORTED = 2, R3K_FAULT_UNALIGNED = 3, R3K_FAULT_TIMEOUT = 4,

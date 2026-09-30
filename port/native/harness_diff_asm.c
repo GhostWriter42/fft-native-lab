@@ -185,6 +185,14 @@ extern int battle_thread_get_current_parameter_2(void);
 extern int battle_thread_get_current_parameter_3(void);
 extern int battle_thread_is_previous_running(void);
 extern int battle_thread_is_running_8014cc94(int thread_id);
+extern int battle_mul_div_s64(int a, int b, int c);
+extern int battle_fixed_cross_product_q12(int a, int b, int c, int d);
+extern void battle_clear_menu_render_buffer(void* buffer, int bytes);
+#define G_OVERFLOW 0x80173f58u
+/* compare one extra word (outside the standard compared regions) after trial_end */
+static void extra_cmp(const char* what, unsigned x, unsigned y, unsigned where) {
+    if (x != y) { t_mem++; total_bad++; report(what, x, y, where); }
+}
 
 int main_test(void) {
     int t, k;
@@ -242,6 +250,43 @@ int main_test(void) {
         args[0] = (unsigned)(rnd() % 16);
         trial_start();
         rn = (unsigned)battle_thread_is_running_8014cc94((int)args[0]); native_done(); interp_call("battle_thread_is_running_8014cc94", args, 1); trial_end(rn, 1, 0);
+    }
+    end_group();
+    begin("battle_mul_div_s64");
+    for (t = 0; t < 20000; t++) {
+        int a, b, c;
+        unsigned m = rnd() % 8;
+        a = m < 3 ? rrange(-100, 100) : (m < 6 ? rrange(-100000, 100000) : rs32());
+        b = m < 2 ? rrange(-100, 100) : (m < 5 ? rrange(-5000, 5000) : rs32());
+        c = (rnd() % 16 == 0) ? 0 : ((rnd() & 1) ? rrange(-2000, 2000) : (rnd() % 4 ? rs32() : rrange(1, 64)));
+        *(int*)G_OVERFLOW = 0; copy_in(G_OVERFLOW, G_OVERFLOW + 4);
+        random_gte(); trial_start();
+        rn = (unsigned)battle_mul_div_s64(a, b, c); native_done();
+        args[0] = (unsigned)a; args[1] = (unsigned)b; args[2] = (unsigned)c;
+        interp_call("battle_mul_div_s64", args, 3); trial_end(rn, 1, 0);
+        extra_cmp("overflow flag", *(unsigned*)G_OVERFLOW, *(unsigned*)(interp_ram + (G_OVERFLOW & 0x1fffff)), G_OVERFLOW);
+    }
+    end_group();
+    begin("battle_fixed_cross_product_q12");
+    for (t = 0; t < 20000; t++) {
+        int a = (t & 1) ? rrange(-20000, 20000) : rs32(), b = (t & 2) ? rrange(-20000, 20000) : rs32();
+        int c = (t & 4) ? rrange(-20000, 20000) : rs32(), d = (t & 8) ? rrange(-20000, 20000) : rs32();
+        *(int*)G_OVERFLOW = 0; copy_in(G_OVERFLOW, G_OVERFLOW + 4);
+        random_gte(); trial_start();
+        rn = (unsigned)battle_fixed_cross_product_q12(a, b, c, d); native_done();
+        args[0] = (unsigned)a; args[1] = (unsigned)b; args[2] = (unsigned)c; args[3] = (unsigned)d;
+        interp_call("battle_fixed_cross_product_q12", args, 4); trial_end(rn, 1, 0);
+        extra_cmp("overflow flag", *(unsigned*)G_OVERFLOW, *(unsigned*)(interp_ram + (G_OVERFLOW & 0x1fffff)), G_OVERFLOW);
+    }
+    end_group();
+    begin("battle_clear_menu_render_buffer");
+    for (t = 0; t < 4000; t++) {
+        int bytes = (int)(rnd() % 700);
+        unsigned off = (rnd() % 16) * 4;                                  /* the routine needs a word-aligned buffer */
+        fill_random(BUF0, 1024);
+        random_gte(); trial_start();
+        battle_clear_menu_render_buffer((void*)(BUF0 + off), bytes); native_done();
+        args[0] = BUF0 + off; args[1] = (unsigned)bytes; interp_call("battle_clear_menu_render_buffer", args, 2); trial_end(0, 0, 0);
     }
     end_group();
     (void)k;

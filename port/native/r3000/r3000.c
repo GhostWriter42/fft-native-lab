@@ -15,30 +15,36 @@ static void set_fault(r3k_t* c, int kind, unsigned int pc, unsigned int ins, uns
     c->fault = kind; c->fault_pc = pc; c->fault_instr = ins; c->fault_addr = addr;
 }
 
-static void note_code_read(r3k_t* c, unsigned int a) {
+static void note_wild(r3k_t* c, unsigned int a) { if ((a >> 29) != 4 || (a & 0x1fffffffu) >= 0x200000u) c->wild++; }
+static int in_code(r3k_t* c, unsigned int a) {
     unsigned int lo = 0, hi = c->ncode;
     while (lo < hi) {                                           /* binary search for the last range starting at or below a */
         unsigned int mid = (lo + hi) / 2;
         if (c->code_lo[mid] <= a) lo = mid + 1; else hi = mid;
     }
-    if (lo && a < c->code_hi[lo - 1]) c->code_reads++;
+    return lo && a < c->code_hi[lo - 1];
 }
+static void note_code_read(r3k_t* c, unsigned int a) { if (in_code(c, a)) c->code_reads++; }
+static void note_code_write(r3k_t* c, unsigned int a) { if (in_code(c, a)) c->code_writes++; }
 static unsigned int rd8(r3k_t* c, unsigned int a) {
     unsigned char* p = mp(c, a);
     if (c->ncode) note_code_read(c, a);
     if (!p) { c->io_reads++; c->io_last_addr = a; return 0; }
+    note_wild(c, a);
     return *p;
 }
 static unsigned int rd16(r3k_t* c, unsigned int a) {
     unsigned char* p = mp(c, a);
     if (c->ncode) note_code_read(c, a);
     if (!p) { c->io_reads++; c->io_last_addr = a; return 0; }
+    note_wild(c, a);
     return *(unsigned short*)p;
 }
 static unsigned int rd32(r3k_t* c, unsigned int a) {
     unsigned char* p = mp(c, a);
     if (c->ncode) note_code_read(c, a);
     if (!p) { c->io_reads++; c->io_last_addr = a; return 0; }
+    note_wild(c, a);
     return *(unsigned int*)p;
 }
 static void wlog(r3k_t* c, unsigned int a, unsigned int v) {
@@ -47,19 +53,25 @@ static void wlog(r3k_t* c, unsigned int a, unsigned int v) {
 static void wr8(r3k_t* c, unsigned int a, unsigned int v) {
     unsigned char* p = mp(c, a);
     wlog(c, a, v);
+    if (c->ncode) note_code_write(c, a);
     if (!p) { c->io_writes++; c->io_last_addr = a; return; }
+    note_wild(c, a);
     *p = (unsigned char)v;
 }
 static void wr16(r3k_t* c, unsigned int a, unsigned int v) {
     unsigned char* p = mp(c, a);
     wlog(c, a, v);
+    if (c->ncode) note_code_write(c, a);
     if (!p) { c->io_writes++; c->io_last_addr = a; return; }
+    note_wild(c, a);
     *(unsigned short*)p = (unsigned short)v;
 }
 static void wr32(r3k_t* c, unsigned int a, unsigned int v) {
     unsigned char* p = mp(c, a);
     wlog(c, a, v);
+    if (c->ncode) note_code_write(c, a);
     if (!p) { c->io_writes++; c->io_last_addr = a; return; }
+    note_wild(c, a);
     *(unsigned int*)p = v;
 }
 
@@ -76,7 +88,7 @@ void r3k_reset(r3k_t* c, unsigned char* ram) {
     c->sp_top = 0x801fff00u;
     c->steps = 0; c->io_reads = c->io_writes = c->io_last_addr = 0; c->syscalls = c->bios_calls = c->rand_calls = 0;
     c->fault = 0; c->fault_pc = c->fault_instr = c->fault_addr = 0;
-    c->ncode = c->code_reads = 0; c->trace_calls = c->call_n = 0; c->call_hook = 0; c->pending_call = 0; c->cur_pc = 0; c->div_zero = c->div_overflow = 0; c->watch_lo = c->watch_hi = 0; c->wlog_n = 0;
+    c->ncode = c->code_reads = c->code_writes = c->wild = c->nsdk = c->sdk_hits = 0; c->trace_calls = c->call_n = 0; c->call_hook = 0; c->pending_call = 0; c->cur_pc = 0; c->div_zero = c->div_overflow = 0; c->watch_lo = c->watch_hi = 0; c->wlog_n = 0;
 }
 
 /* BIOS A-table entries that the game's C code reaches through the libc stubs (e.g. rand at 0x8002230c: li t2,0xa0; jr t2; li t1,0x2f). */
@@ -151,7 +163,7 @@ static int step(r3k_t* c) {
         case 0x06: SETR(rd, b >> (a & 31)); break;
         case 0x07: SETR(rd, (unsigned int)((int)b >> (a & 31))); break;
         case 0x08: c->npc = a; break;
-        case 0x09: SETR(rd, cur + 8); c->npc = a; if (c->trace_calls) c->pending_call = a; break;
+        case 0x09: SETR(rd, cur + 8); c->npc = a; if (c->nsdk) { unsigned int q; for (q = 0; q < c->nsdk; q++) if (a >= c->sdk_lo[q] && a < c->sdk_hi[q]) c->sdk_hits++; } if (c->trace_calls) c->pending_call = a; break;
         case 0x0c: c->syscalls++; if (c->r[4] == 1) c->r[2] = 1; break;                  /* EnterCriticalSection / ExitCriticalSection */
         case 0x0d: set_fault(c, R3K_FAULT_BREAK, cur, ins, 0); return 1;
         case 0x10: SETR(rd, c->hi); break;
@@ -191,8 +203,8 @@ static int step(r3k_t* c) {
         default: UNSUPPORTED();
         }
         break;
-    case 2: c->npc = (c->pc & 0xf0000000u) | ((ins & 0x3ffffffu) << 2); if (c->trace_calls) c->pending_call = c->npc; break;
-    case 3: SETR(31, cur + 8); c->npc = (c->pc & 0xf0000000u) | ((ins & 0x3ffffffu) << 2); if (c->trace_calls) c->pending_call = c->npc; break;
+    case 2: c->npc = (c->pc & 0xf0000000u) | ((ins & 0x3ffffffu) << 2); if (c->nsdk) { unsigned int q; for (q = 0; q < c->nsdk; q++) if (c->npc >= c->sdk_lo[q] && c->npc < c->sdk_hi[q]) c->sdk_hits++; } if (c->trace_calls) c->pending_call = c->npc; break;
+    case 3: SETR(31, cur + 8); c->npc = (c->pc & 0xf0000000u) | ((ins & 0x3ffffffu) << 2); if (c->nsdk) { unsigned int q; for (q = 0; q < c->nsdk; q++) if (c->npc >= c->sdk_lo[q] && c->npc < c->sdk_hi[q]) c->sdk_hits++; } if (c->trace_calls) c->pending_call = c->npc; break;
     case 4: BRANCH(a == b); break;
     case 5: BRANCH(a != b); break;
     case 6: BRANCH((int)a <= 0); break;
