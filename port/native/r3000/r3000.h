@@ -1,0 +1,46 @@
+#ifndef R3000_H
+#define R3000_H
+/* A small MIPS R3000A (PlayStation CPU) interpreter: the "oracle" for the native port.
+ *
+ * It runs the game's ORIGINAL machine code (SCUS_942.21 / overlay images loaded at their link addresses) so that a native
+ * function can be compared, bit for bit, against the code the console ran. CPU only: no video, sound, CD or DMA -- the
+ * hardware register window reads as zero and is counted so a test can notice when a function touches hardware.
+ *
+ * Implemented: the whole MIPS-I integer set (branch and load delay slots included, unaligned lwl/lwr/swl/swr), COP2 through
+ * the software GTE in ../gte (register moves, lwc2/swc2, commands), the BIOS A-table entries the game's C code reaches
+ * (rand, srand, abs, labs and a few memory/string helpers), syscall 1/2 (critical section) as no-ops. Not implemented: exceptions, interrupts, COP0
+ * beyond harmless reads/writes, caches, cycle timing. An unsupported instruction stops execution and sets `fault`.
+ *
+ * Freestanding (no libc). */
+
+typedef struct r3k {
+    unsigned int r[32];
+    unsigned int hi, lo;
+    unsigned int pc, npc;               /* npc = address of the instruction after the one at pc (delay slot handling) */
+    unsigned int ld_reg, ld_val;        /* pending load (visible after the next instruction) */
+    unsigned char* ram;                 /* 2 MiB, mirrored through 8 MiB */
+    unsigned char scratch[1024];        /* 0x1f800000 scratchpad */
+    unsigned int bios_rand_seed;        /* BIOS rand()/srand() state */
+    unsigned int sp_top;                /* initial stack pointer for r3k_call */
+    unsigned long long steps;           /* instructions executed since reset */
+    unsigned int io_reads, io_writes;   /* accesses outside RAM/scratchpad */
+    unsigned int io_last_addr;
+    unsigned int syscalls, bios_calls;
+    int fault;                          /* 0 = ok; see R3K_FAULT_* */
+    unsigned int fault_pc, fault_instr, fault_addr;
+} r3k_t;
+
+enum { R3K_OK = 0, R3K_FAULT_BAD_FETCH = 1, R3K_FAULT_UNSUPPORTED = 2, R3K_FAULT_UNALIGNED = 3, R3K_FAULT_TIMEOUT = 4,
+       R3K_FAULT_BIOS = 5, R3K_FAULT_BREAK = 6, R3K_FAULT_OVERFLOW = 7 };
+
+#define R3K_SENTINEL 0xfffffff0u        /* return address planted in $ra by r3k_call */
+
+void r3k_reset(r3k_t* c, unsigned char* ram);
+/* Call the function at `addr` with up to 8 integer arguments (a0-a3 then the stack, as the o32 ABI does).
+ * Returns R3K_OK if it returned to the sentinel; the result is c->r[2] (and c->r[3]). */
+int r3k_call(r3k_t* c, unsigned int addr, const unsigned int* args, int nargs, unsigned long long max_steps);
+
+unsigned int r3k_read32(r3k_t* c, unsigned int addr);
+void r3k_write32(r3k_t* c, unsigned int addr, unsigned int value);
+
+#endif
