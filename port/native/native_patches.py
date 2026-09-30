@@ -264,4 +264,14 @@ PATCHES = [
             'a1/a2 save slots are adjacent, so that is (position, dimensions); a native frame keeps them apart (lockstep, world map frame 3839: record w/h native '
             '0x000000b1 vs original 0x00300048, then a different LoadImage rectangle and window image). The patch copies the two arguments explicitly.',
     ),
+    dict(
+        file='src/world/world_menu_scrolling_list_thread.c',
+        old='        SetSemiTrans(&frame, 1);\n',
+        new='        /* retail: SetSemiTrans(&frame, 1) -- the address of the local POINTER (see battle_menu_run_scrolling_ability_list_thread.c): it sets bit 1 of the\n'
+            '         * byte at &frame + 7, which in the MIPS frame (sp+0xc3) is padding after `toggle`. A native frame has a live local there. No effect in retail. */\n',
+        why='lockstep world-map soak (seeds 103, 107, 108, 110, 112, 117, 119, 120, 124): twin of the BATTLE scroll-list thread. SetSemiTrans(&frame, 1) writes `code |= 2` at offset 7 '
+            'of the address of the `frame` pointer; natively that byte is the top byte of the next local (row_offset became 0x02000000 and the list code crashed reading '
+            '0x8416e4fe). Disassembly (0x800edfb0: addiu a0,sp,188; sw s2,188(sp)): `toggle` is the s16 at sp+192 and the next live word is sp+196, so sp+195 is padding '
+            'and the retail write is harmless; dropping the call is exactly equivalent.',
+    ),
 ]

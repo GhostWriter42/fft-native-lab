@@ -10,6 +10,9 @@ writes transformed copies under an output directory:
   3. `extern T volatile g;` (file-local "volatile views" of a global declared without volatile in a header)
                                            -> `#define g (*(T volatile*)&g)`   (same semantics, valid C)
   4. asm with a NON-empty template         -> left as is and listed in the report (needs a real port)
+  5. `((s32 (*)(void))f)()` where f is declared to return s8/u8/s16/u16
+                                           -> `((s32)f())`   (the retail callee returns its value already sign/zero extended in $v0, which the
+                                              cast call consumes as 32 bits; a native callee leaves the upper bits undefined -- see narrow_return_calls)
 
 Usage:  portify.py <repo-or-snapshot-root> <out-dir> [--report FILE]
 Only the standard library is needed. Comments and string/char literals are respected (masked before matching).
@@ -349,6 +352,74 @@ def transform(text, rel, report):
     return out
 
 
+NARROW_TYPES = {'s8', 'u8', 's16', 'u16'}
+WIDE_TYPES = {'s32', 'u32', 'int'}
+CAST_CALL = re.compile(r'\(\(\s*(?P<ret>[A-Za-z_][\w ]*?)\s*\(\s*\*\s*\)\s*\((?P<params>[^()]*(?:\([^()]*\)[^()]*)*)\)\s*\)\s*(?P<name>[A-Za-z_]\w*)\s*\)\s*\(')
+PROTOTYPE = re.compile(r'(?m)^[ \t]*(?:extern[ \t]+)?(?P<ret>[A-Za-z_][\w \t\*]*?)[ \t]*\b(?P<name>[A-Za-z_]\w*)[ \t]*\((?P<params>[^;{}()]*(?:\([^()]*\)[^;{}()]*)*)\)[ \t]*;')
+
+
+def count_params(p):
+    p = p.strip()
+    if p in ('', 'void'):
+        return 0
+    if '...' in p:
+        return -1
+    depth, n = 0, 1
+    for ch in p:
+        if ch in '([':
+            depth += 1
+        elif ch in ')]':
+            depth -= 1
+        elif ch == ',' and depth == 0:
+            n += 1
+    return n
+
+
+def narrow_return_calls(outdir, report):
+    """Calls through a function-pointer cast of a function whose declared return type is NARROW (s8/u8/s16/u16), with the cast returning a
+    32-bit integer: `((s32 (*)(void))world_input_get_tutorial_buttons)()`. The decomp writes them so (the plain call would make GCC 2.6.3 add an
+    extension the target does not have); the retail callee has already sign/zero-extended the value into $v0 (an `lh`/`lbu` of its global, or an
+    explicit sll/sra), and the caller uses the register as it is. A native callee returns the narrow value in al/ax with undefined upper bits, so the
+    cast call reads garbage there (lockstep: world menu input 0x00008000 instead of 0xffff8000). Turning the call into a real call with a widening
+    cast gives the C value of the narrow type -- exactly the extended register. Only cast calls whose argument list has as many parameters as the
+    declaration are rewritten (the ones with stale arguments need a reviewed patch)."""
+    decl = {}                                        # name -> (return type, number of parameters)
+    for p in sorted((outdir / 'include').rglob('*.h')):
+        for m in PROTOTYPE.finditer(mask(p.read_bytes().decode('utf-8'))):
+            decl.setdefault(m.group('name'), (' '.join(m.group('ret').replace('extern', '').split()), count_params(m.group('params'))))
+    defs = {p.stem: p for p in (outdir / 'src').rglob('*.c')}
+    done = []
+    for p in sorted(defs.values()):
+        rel = p.relative_to(outdir).as_posix()
+        if '/psyq/' in rel:
+            continue
+        text = p.read_bytes().decode('utf-8')
+        masked = mask(text)
+        edits = []
+        for m in CAST_CALL.finditer(masked):
+            ret, name = ' '.join(m.group('ret').split()), m.group('name')
+            if ret not in WIDE_TYPES:
+                continue
+            info = decl.get(name)
+            if name in defs:                            # the definition is authoritative (headers may omit static helpers)
+                dm = re.search(r'(?m)^(?P<ret>[A-Za-z_][\w \t\*]*?)\b' + re.escape(name) + r'\s*\((?P<params>[^{;]*)\)\s*\{', mask(defs[name].read_bytes().decode('utf-8')))
+                if dm:
+                    info = (' '.join(dm.group('ret').split()), count_params(dm.group('params')))
+            if not info or info[0] not in NARROW_TYPES or info[1] < 0 or count_params(m.group('params')) != info[1]:
+                continue
+            open_idx = m.end() - 1                      # the '(' that starts the argument list
+            close = match_paren(masked, open_idx)
+            if close < 0:
+                continue
+            edits.append((m.start(), close, '((%s)%s(%s))' % (ret, name, text[open_idx + 1:close - 1])))
+            done.append((rel, text.count('\n', 0, m.start()) + 1, name, info[0]))
+        if edits:
+            for s0, e0, r0 in reversed(edits):
+                text = text[:s0] + r0 + text[e0:]
+            p.write_bytes(text.encode('utf-8'))
+    report['narrow'] = done
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('root')
@@ -357,7 +428,7 @@ def main():
     args = ap.parse_args()
     root, outdir = Path(args.root), Path(args.out)
     report = dict(pins=0, barriers=0, views=0, views_kept=0, real_asm=[], odd=[], asm_assign=[], asm_output_only=[], asm_macros_dropped=[], pins_by_file=Counter(),
-                  barriers_by_file=Counter(), files=0, headers=HeaderIndex(root))
+                  barriers_by_file=Counter(), files=0, headers=HeaderIndex(root), narrow=[])
     for sub in ('include', 'src'):
         for p in sorted((root / sub).rglob('*')):
             if not p.is_file() or p.suffix not in ('.c', '.h'):
@@ -384,8 +455,10 @@ def main():
                     sys.exit(f"native patch must match {want} time(s) in {rel}: {pt['old']!r} (found {text.count(pt['old'])})")
                 dst.write_bytes(text.replace(pt['old'], pt['new']).encode('utf-8'))
                 npatched += 1
+    narrow_return_calls(outdir, report)
     lines = [
         f"native patches applied:    {npatched} (port/native/native_patches.py)",
+        f"narrow-return cast calls:  {len(report['narrow'])} made real calls (callee returns s8/u8/s16/u16, cast consumed it as 32 bits)",
         f"files written:             {report['files']}",
         f"register pins removed:     {report['pins']} (in {len(report['pins_by_file'])} files)",
         f"empty asm statements gone: {report['barriers']} (in {len(report['barriers_by_file'])} files)",
@@ -408,6 +481,9 @@ def main():
             f.write('\n== output-only asm deleted (variable left undefined) ==\n')
             for rel, line, t in report['asm_output_only']:
                 f.write(f'{rel}:{line}: {t}\n')
+            f.write('\n== narrow-return cast calls rewritten as real calls ==\n')
+            for rel, line, name, typ in report['narrow']:
+                f.write(f'{rel}:{line}: {name} ({typ})\n')
             f.write('\n== unrecognised ==\n')
             for rel, line, t in report['odd']:
                 f.write(f'{rel}:{line}: {t}\n')

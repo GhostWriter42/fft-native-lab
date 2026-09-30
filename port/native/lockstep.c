@@ -623,7 +623,7 @@ static int nat_ar[8192];
 static int n_nat, n_ps1;
 static int no_event_name(const char* n) {                                   /* BIOS veneers: compiler-generated calls to them exist only natively */
     static const char* const list[] = { "memset", "psyq_api_memcpy", "memmove", "bzero", "bcopy", "strlen", "strcpy", "strcmp", "strcat", "memchr", "rand", "srand",
-                                        "sin_1", "psyq_gte_csqrt_kernel", 0 };                    /* the last two: helpers of the natively replaced libgte, only ever called from inside it */
+                                        "sin_1", "psyq_gte_csqrt_kernel", "Lzc", 0 };             /* the last three: helpers of the natively replaced libgte, only ever called from inside it */
     int i;
     for (i = 0; list[i]; i++) if (streq(n, list[i])) return 1;
     return 0;
