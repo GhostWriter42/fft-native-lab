@@ -24,7 +24,8 @@ battles with a simple front end) can start before any renderer exists.
 | Phase | Goal | Deliverable | Key risk / open question | Rough effort |
 |---|---|---|---|---|
 | **N0** | Groundwork (**done**) | portify transform, 97.8% files compile, RAM image, native attack, hazards list, asset decoders | — | done |
-| **N1** | The platform shim | software GTE (12 commands) + libgte API (33 functions), BIOS services (56, mostly trivial), heap/CD/card/pad stubs, `rand` reimplemented with **verified** constants | GTE exactness vs hardware (only matters for fidelity; determinism only needs both peers to agree) | 2–4 weeks |
+| **N1** | The platform shim | software GTE (12 commands) + libgte API (33 functions) — **done 2026-09-30**: `port\native\gte\`, 35 libgte functions match the original machine code in 128,200 differential trials; BIOS services (56, mostly trivial), heap/CD/card/pad stubs, `rand` reimplemented with **verified** constants (the documented LCG is in place but unverified against the BIOS ROM). Measured link boundary of `src/main`+`src/battle`: 201 externals (GPU ~50, SPU ~35, CD ~16, pad/events/timers ~20, libc 6, other-overlay entry points ~20, asm-only ~12) — see `PORT-FEASIBILITY.md` | GTE exactness vs hardware (only matters for fidelity; determinism only needs both peers to agree) | 2–4 weeks (GTE part done) |
+| **N1b** | The oracle (**built**) | `port\native\r3000\`: an R3000 interpreter that runs the original machine code from the disc, so any native function can be diffed bit-for-bit against the original — no emulator needed. ~150k trials over ~100 battle formulas: 0 differences | only functions with a fully native call tree are covered so far; next: a generic fuzzer over all ~2,300 main+battle functions | done (extend as the port grows) |
 | **N2** | Overlay modules + main loop | one native module per overlay (OPEN/WLDCORE/WORLD/BATTLE/EVENT/EFFECT) with its own symbol map, data-image reload on switch, the boot -> title -> world -> battle loop running with a null renderer | function-pointer tables hold PS1 addresses (need id -> native map, as done for formulas); cooperative threads as RAM-resident coroutines | 3–6 weeks |
 | **N3** | A renderer | GPU ordering tables -> a hardware renderer (GT4/FT4/GT3/F3/F4/G4/SPRT/TILE/LINE, draw-mode/tpage, VRAM moves); float GTE path for geometry; 256x240 -> any resolution; widescreen with camera/culling changes | correctness of texture/CLUT/semi-transparency emulation; perspective/affine differences | 4–8 weeks |
 | **N4** | Audio | SPU + Suzuki sound driver (SMD sequences, ADPCM samples), CD-XA/STR streams or converted assets | timing exactness of the driver; movie (STR/MDEC) playback or replacement | 3–6 weeks |
@@ -64,6 +65,6 @@ renderer exists, and its core carries straight into route N.
 ## Decisions I need from you
 
 1. Route: E first, N, or both?
-2. OK to download an emulator (name/size will be stated first) for route E?
+2. OK to download an emulator (name/size will be stated first) for route E? (No longer needed for *validation* — the R3000 oracle covers that — only for trying route E itself.)
 3. Publish the upstream branches (and under which identity), or keep them local?
 4. Multiplayer scope for the prototype: PvP duel, co-op missions, or "decide later"?

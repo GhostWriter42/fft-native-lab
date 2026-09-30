@@ -83,7 +83,8 @@ Limits and caveats:
   by actually linking (spike 3 below), the closure of the whole combat-formula layer is **244 functions** and converges.
   Reachability through *state machines* (menus, effects, camera) is a different matter: those are called through
   function-pointer tables and the `g_battle_game_state` switch, so they are pulled in by choosing modules, not by call graph.
-* No oracle yet against original behaviour; the checks above compare against known FFT rules, not against a trace.
+* (Superseded: the first spikes were checked against FFT's rules only. Since 2026-09-30 there is an oracle — see "The oracle" below —
+  and the formula layer now matches the original machine code in ~149,000 differential trials.)
 
 **Spike 3 — `.\port\native\attack.ps1`: a full weapon attack resolved by the game's own code.** All 209
 `battle_formula_*` functions, the generated native formula-handler table (`g_battle_formula_handlers` decoded from
@@ -109,6 +110,55 @@ own code and data. Output: `port\native\OUTPUT-attack.txt`.
 
 What it means: the rules engine is **deterministic, self-contained and runs headlessly** — exactly the piece an
 authoritative co-op/PvP host (or a lockstep peer) needs. Serving a battle without any graphics, GTE or SPU is realistic.
+
+## The oracle: the original machine code as the reference (`port\native\r3000\`, added 2026-09-30)
+
+Spikes 1–3 were checked against FFT's *rules*, not against the original program. No emulator is needed to close that gap: the
+disc image already contains the original machine code. `port\native\r3000\` is a small (~400 lines, freestanding C) **MIPS R3000A
+interpreter**: the whole MIPS-I integer set with branch- and load-delay slots and unaligned load/store, COP2 through the software
+GTE (`port\native\gte\`), the BIOS entries the game's C code reaches (`rand`, `srand`, `abs`, memory/string helpers), `syscall`
+critical sections as no-ops, and a fault for anything unsupported. CPU only — no GPU/SPU/CD/DMA; hardware-window accesses read as
+zero and are counted so a test can tell. A **differential test** runs a function both ways on identical inputs — the native build
+inside the process's mapped RAM image, and the original code on the interpreter — and compares the return value and every data byte
+of the 2 MiB RAM (code ranges excluded). The native half of each trial runs in a forked child, so a native crash is caught and
+classified instead of ending the run.
+
+| Test (script in `port\native\`) | Trials | Result |
+|---|---|---|
+| native libgte, 35 functions incl. `RotMatrix`, `ApplyMatrixLV`, `VectorNormal`, `SquareRoot0/12`, `Mul/Scale/Push/PopMatrix`, `RotTransPers*`, `NormalClip`, plus `rsin/rcos/ratan2/csqrt` compiled from the repo (`diff_libgte.ps1`) | 128,200 | **0 differences** in return values and memory; only the scratch GTE register VZ0 differs after `MulMatrix*` |
+| ~100 battle-formula handlers, called through the game's own `g_battle_formula_handlers` table (`diff_formulas.ps1 -Trials 1500`) | 149,086 | **0 differences, 0 native crashes** (random units + ability record, half fully random bytes, half plausible values) |
+| native C replacements for 8 hand-assembled BATTLE routines in `replacements\battle_asm.c` (`diff_asm.ps1`) | 28,000 | **0 differences** |
+| GTE unit tests, incl. the hardware-style perspective divide vs exact division (`gte\tests\run.ps1`) | 4.58 M checks | all pass |
+
+What the oracle found or forced (each is handled in the tools):
+* **Function pointers hold PS1 addresses.** The harness writes an x86 `jmp` at every natively linked function's *original* address
+  (a trampoline; `gen_stubs.py` + `harness_diff_formulas.c`), so `g_battle_formula_handlers[i]()` lands on native code without patching
+  any table; code ranges are excluded when RAM is copied and compared. Overlays share addresses, so a runtime must install the
+  trampolines per loaded overlay.
+* **A symbol-script bug.** `main.yaml` lists 35 overlay functions as bare address rows, and `gen_symbols.py` linked them at their PS1
+  addresses instead of compiling them (a jump into data on the first call). Function names are now excluded from the data-symbol script.
+* **Divide by zero.** x86 traps where MIPS defines a result (`lo = -1` or `1`, `hi` = the dividend); ARM would return 0. Real data does
+  not hit it (3 of ~150k random states, all in formula 66), but a modded value would crash a native build, and multiplayer needs every
+  peer to agree on the result. The port needs a defined behaviour at the source level (checked division), not a SIGFPE hack.
+* **Random input can make the original read its own machine code as data** (a wild table index lands in the code region; natively those
+  bytes are the trampolines). The interpreter now counts data loads from code ranges and such trials are skipped (853 of ~150k).
+* **A divergence that looked like a real undefined-behaviour bug** (formula 37, 1 state in ~1,440: native called `rand()` twice, the original once)
+  was traced with the harness's replay mode (`diff_formulas.ps1 -Replay '37,1332'`: call trace and a RAM hash at every call on both machines,
+  then the RAM diff at the first diverging call, then the original's arguments) to exactly that artifact. Along the way: a `jal`'s delay slot
+  runs *before* the callee starts, so state snapshots must be taken when the callee is entered, not at the `jal`.
+* **Real MIPS asm has native equivalents.** `battle_copy_bytes`, `battle_find_text_id_location` and the six thread accessors are
+  plain C in `replacements\battle_asm.c` (the WORLD twins are in `world_asm.c`, compiled but not yet diffed — they need the WORLD overlay in
+  the interpreter's RAM). `battle_thread_get_current_global_pointer` returns `$gp`, which has no native meaning; it returns 0.
+
+What it does **not** prove yet: both machines use the *same software GTE*, so libgte is verified against the original *algorithms*, not against
+GTE hardware; both use the documented BIOS `rand` LCG (unverified against the BIOS ROM); inputs are random, not recorded battles; and only
+functions whose whole call tree is native are covered (the 244-function formula layer; the other ~2,000 need SDK stubs first).
+
+**The native link boundary** (`.\port\native\boundary.ps1`: compiles every `src/main` + `src/battle` file with the GTE shim, in parallel). 2,308 of 2,316
+files compile natively; the 8 that do not are the hand-assembled routines above. The remaining **201 unresolved externals** are exactly the platform
+layer a native port has to provide: GPU/primitive setup (`AddPrim`, `ClearOTag`, `DrawOTag`, `LoadImage`, `PutDispEnv`, `SetPolyF4`… ~50), SPU (~35),
+CD (~16), pad/events/timers/`VSync` (~20), libc (`abs`, `bzero`, `memcpy`, `memset`, `rand`, `srand`, `SetMem`), the entry points of the *other overlays*
+(`attack_*`, `bunit_entrypoint`, `equip_entrypoint`, `option_entrypoint`, `jobstts_entrypoint`… ~20), and ~12 asm-only functions. Nothing else.
 
 ## HD sprite pipeline: upscale in index space (validated on one sheet)
 
@@ -298,13 +348,15 @@ Caveats that decide whether snapshots are exact:
    separate, later refactor.
 2. Do not edit the sources for portability. Generate portable copies at build time (`portify.py`) — the matching decomp
    stays byte-exact upstream, the port lives downstream. (Done; it also handles the volatile-view conflicts.)
-3. **Software GTE + libgte API** (12 GTE commands, 33 game-facing functions) so the last 70 game files compile; decide the
-   precision policy (integer-exact for determinism, plus a float path for HD geometry).
+3. **Software GTE + libgte API** (12 GTE commands, 33 game-facing functions) so the last 70 game files compile — **done**
+   (`port\native\gte\`, verified against the original code; with the shim, 4,876 of 4,878 game+main files compile natively, the two
+   failures being hand-assembled text-scan loops that now have C replacements); decide the precision policy (integer-exact for
+   determinism, plus a float path for HD geometry).
 4. Everything else is the platform layer: GPU ordering tables -> renderer, SPU/Suzuki sound driver, CD, memory card, BIOS
    services, the cooperative-thread context switch (RAM-resident coroutines), one native module per overlay, and the 41
    game files that poke hardware registers. The 295 files with hardcoded `0x80xxxxxx` addresses need nothing beyond the RAM image.
 
-What is proven: game logic compiles and runs natively against real disc data (spikes 1–3). Remaining unknowns are runtime ones
-(overlay switching, thread switching, timing) and there is still **no oracle against original behaviour**: the next validation
-worth building is a trace comparison (record emulator RAM around a battle action, replay it natively, compare), which needs an
-emulator — see `ROADMAP.md`.
+What is proven: game logic compiles and runs natively against real disc data (spikes 1–3), and the native formula layer and libgte
+match the *original machine code* bit for bit on ~277,000 differential trials (the oracle above). Remaining unknowns are runtime
+ones (overlay switching, thread switching, timing) and fidelity ones (GTE hardware, BIOS `rand`, recorded-battle traces — the latter
+two would need an emulator or a console capture; everything else is covered without one) — see `ROADMAP.md`.

@@ -32,6 +32,11 @@ typedef struct r3k {
     unsigned int div_zero, div_overflow;/* divisions by zero / INT_MIN / -1 seen (defined on MIPS, traps on x86) */
     unsigned int watch_lo, watch_hi;    /* writes to [watch_lo, watch_hi) are logged (debugging aid; empty by default) */
     unsigned int wlog_n, wlog_pc[16], wlog_addr[16], wlog_val[16];
+    unsigned int trace_calls, call_n, call_trace[1024];   /* targets of jal/jalr/j while trace_calls is set (debugging aid) */
+    void (*call_hook)(struct r3k* c, unsigned int target);  /* optional: called when a traced jump target is REACHED (after its delay slot ran) */
+    unsigned int pending_call;          /* jump target waiting for its delay slot to finish */
+    unsigned int ncode, code_lo[4096], code_hi[4096];   /* optional sorted code ranges: data loads from them are counted in code_reads */
+    unsigned int code_reads;
 } r3k_t;
 
 enum { R3K_OK = 0, R3K_FAULT_BAD_FETCH = 1, R3K_FAULT_UNSUPPORTED = 2, R3K_FAULT_UNALIGNED = 3, R3K_FAULT_TIMEOUT = 4,
