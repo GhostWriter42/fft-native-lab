@@ -90,33 +90,36 @@ Dropped after investigation: `goto` removal (the remaining gotos are documented 
 
 ---
 
-## Late-night update: native-port verification (written when the usage limit hit)
+## Late-night update: native-port verification
 
 **New: an oracle that needs no emulator.** `port/native/r3000/` is a small MIPS R3000 interpreter that runs the *original*
 machine code from your disc image. A native function can now be run on the same inputs both ways and compared bit for bit
-(return value + every data byte of the 2 MiB RAM image). This replaces the "needs an emulator download" item in ROADMAP.
+(return value + every data byte of the 2 MiB RAM image). This replaces the "needs an emulator download" item in ROADMAP
+(an emulator is still optional for trying route E itself).
 
 | What | Trials | Result |
 |---|---|---|
-| Native libgte (35 functions) vs original code (`port/native/diff_libgte.ps1`) | 128,200 | **0 differences** (only scratch GTE register VZ0 differs after MulMatrix*) |
+| Native libgte (35 functions) vs original code (`port/native/diff_libgte.ps1`) | 128,200 | **0 differences** (only the scratch GTE register VZ0 differs after MulMatrix*) |
+| ~100 battle-formula handlers vs original code (`port/native/diff_formulas.ps1 -Trials 1500`) | 149,086 | **0 differences, 0 native crashes** |
+| Native C replacements for the 8 hand-assembled BATTLE routines (`port/native/diff_asm.ps1`) | 28,000 | **0 differences** |
 | GTE unit tests (`port/native/gte/tests/run.ps1`), incl. hardware-style perspective divide vs exact division | 4.58 M checks | all pass |
-| ~100 battle-formula handlers vs original code (`port/native/diff_formulas.ps1 -Trials 1500`) | ~150,000 | identical except the two items below |
 
-Two findings from the formula fuzz (neither is fixed yet):
-1. **Formula 37** (`battle_formula_break_equipped_hit_pa_wp_x_percent`): 1 random state in ~1,440 diverges (trial 1332; the
-   native build calls `rand()` twice where the original calls it once). Root cause not found yet. Replay: run the script above; the
-   report prints the original writers. It is exactly the kind of native-vs-retail difference (evaluation order / uninitialised
-   value) that would desync multiplayer, so it is the first thing to look at.
-2. **Formula 66**: x86 raises SIGFPE on divide-by-zero where MIPS defines a result. Real game data never divides by zero here,
-   but mods could; the native port needs a defined behaviour (source-level checked division, not a SIGFPE hack).
+What the fuzz surfaced (all now understood; details in `PORT-FEASIBILITY.md`, "The oracle"):
+1. **Formula 37** looked like a real native-vs-retail divergence (1 random state in ~1,440). A replay mode (`diff_formulas.ps1 -Replay '37,1332'`,
+   call trace + RAM hash at every call on both machines) traced it to a harness artifact: random input made the original copy 14 bytes of
+   *machine code* as if they were table data, and in the native process those bytes are my x86 trampolines. Such trials are now detected and skipped.
+2. **Divide by zero** (formula 66, 3 of ~150k random states): x86 traps where MIPS returns a defined value. Real data never divides by zero here,
+   but mods could; the port needs a defined behaviour (source-level checked division), which multiplayer also needs so peers agree.
+3. Function pointers in game data hold PS1 addresses; x86 `jmp` trampolines at those addresses fix that (proven in the harness).
+4. `gen_symbols.py` was wrongly linking 35 overlay functions at their PS1 addresses; fixed.
 
-Other results: function pointers in game data hold PS1 addresses; x86 `jmp` trampolines written at those addresses fix this (in the
-harness). `gen_symbols.py` was wrongly linking 35 overlay functions at their PS1 addresses; fixed. Link boundary of
-`src/main`+`src/battle` (`port/native/boundary.ps1`): 2,308 of 2,316 files compile natively; only 201 externals remain: GPU ~50,
-SPU ~35, CD ~16, pad/events/timers ~20, libc 6, other-overlay entry points ~20, asm-only ~12 (`battle_copy_bytes`,
-`battle_find_text_id_location`, thread accessors).
+**Link boundary** of `src/main` + `src/battle` (`port/native/boundary.ps1`): 2,308 of 2,316 files compile natively (the 8 failures are the
+hand-assembled routines, now replaced in `port/native/replacements/`); only **201 externals** remain, and they are exactly the platform layer:
+GPU/primitives ~50, SPU ~35, CD ~16, pad/events/timers ~20, libc 6, other-overlay entry points ~20, asm-only ~12.
 
-Not done: docs above (PORT-FEASIBILITY.md still says "no oracle yet" and predates this), a function-level fuzzer over all
-~2,300 functions (design settled: generic caller + interpreter oracle), native versions of the 8 asm-only battle functions.
-A formula run at 1,500 trials/handler may still be finishing in Docker (harmless). Everything is committed in a *local*
-git repo at the project root (created tonight; `.gitignore` excludes the disc and the two clones). Nothing was pushed or published.
+Docs updated: `PORT-FEASIBILITY.md` (new "oracle" section), `ROADMAP.md` (N1 done, new N1b), `port/README.md`.
+Everything is committed in a *local* git repo at the project root (created tonight; `.gitignore` excludes the disc and the two clones).
+Nothing was pushed or published.
+
+Next candidates: a generic fuzzer over all ~2,300 main+battle functions (generic caller + the oracle), a divide-by-zero policy in `portify`,
+the WORLD overlay in the oracle (its asm twins are written, not yet diffed), and the SDK shim (GPU primitives first, since that is where an HD renderer plugs in).

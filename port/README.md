@@ -15,6 +15,11 @@ and host Python 3 (Pillow for the image tools).
 | `.\port\native\attack.ps1` | native spike 3: a full weapon attack (evade/hit/crit/zodiac/damage) with 244 game functions, 0 stubs |
 | `.\port\native\recon.ps1 -Sources …` | which external functions does a set of sources still need? |
 | `.\port\native\closure.ps1 -Sources … [-Harness x.c]` | grow a slice until it links (auto-adds sources of unresolved functions), optionally link + run a harness |
+| `.\port\native\diff_libgte.ps1` | **differential test**: the native libgte (software GTE) vs the ORIGINAL libgte machine code on the R3000 interpreter (128,200 trials) |
+| `.\port\native\diff_formulas.ps1 [-Trials N] [-Replay 'id,trial']` | differential fuzz of ~100 battle formulas, native vs original code (149k trials); `-Replay` traces one trial on both machines and shows where they first diverge |
+| `.\port\native\diff_asm.ps1` | native C replacements for the hand-assembled BATTLE routines vs the original code (28,000 trials) |
+| `.\port\native\boundary.ps1` | compile all `src/main` + `src/battle` natively (parallel) and list the 201 unresolved externals (the platform layer still to write) |
+| `.\port\native\gte\tests\run.ps1` | unit tests of the software GTE (4.58 M checks) |
 
 ## Tools (`tools\`)
 
@@ -26,12 +31,16 @@ and host Python 3 (Pillow for the image tools).
 | `shp_frames.py` | assemble frames from a sheet using a `.SHP` frame table; `--json` dumps every frame's part rectangles |
 | `sprite_upscale_demo.py` | index-space Scale2x: upscaling that keeps the game's palette swaps working |
 
+`native\r3000\` is the MIPS R3000 interpreter that runs the original machine code (the oracle); `native\gte\` the software GTE + native libgte;
+`native\replacements\` C versions of hand-assembled routines; `native\gen_funcs.py` / `gen_stubs.py` generate the address tables used by the oracle and
+the x86 trampolines.
+
 `native\` also holds the harnesses (`harness_*.c`), the container build scripts, `gen_symbols.py` (linker-script symbols from `target\*.yaml`),
 `decode_handlers.py` (function-pointer table -> native table) and the saved outputs (`OUTPUT-*.txt`).
 `samples\` has three decoded/derived images from your disc (local only).
 
 ## Next milestones (see ROADMAP.md)
 
-1. Software GTE + libgte API + BIOS shim (so the last 70 game files compile).
+1. ~~Software GTE + libgte API~~ (done, verified against the original code); the SDK/BIOS shim for the remaining 201 externals (`boundary.ps1`).
 2. One native module per overlay with its own symbol map; boot -> title -> world -> battle with a null renderer.
 3. A renderer, audio, then HD assets and netcode.
