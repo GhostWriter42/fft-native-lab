@@ -11,9 +11,9 @@
  * Replaces src/world/world_thread_start.c (it must also reset the slot's native context). */
 #include "fft/world.h"
 #include "psx/types.h"
+extern unsigned g_ls_ignore_enter;
 
 #define WT_SLOTS 17
-#define WT_STACK_BYTES 0x40000
 
 typedef struct wt_ctx {
     void* esp;          /* saved stack pointer while the slot is not running */
@@ -21,7 +21,15 @@ typedef struct wt_ctx {
 } wt_ctx_t;
 
 static wt_ctx_t g_wt_ctx[WT_SLOTS] = { { 0, 1 } };            /* slot 0 = the running main context */
+#ifdef LOCKSTEP_THREAD_WINDOW                                 /* whole-program lockstep: the stacks sit in the mapped window above RAM (thread_window.h) */
+#include "thread_window.h"
+#define WT_STACK_BYTES THREAD_STACK_BYTES
+#define WT_STACK(slot) ((unsigned char*)(THREAD_STACK_WINDOW + THREAD_STACK_WORLD_OFFSET + (unsigned)(slot) * THREAD_STACK_BYTES))
+#else
+#define WT_STACK_BYTES 0x40000
 static unsigned char g_wt_stacks[WT_SLOTS][WT_STACK_BYTES] __attribute__((aligned(16)));
+#define WT_STACK(slot) (g_wt_stacks[slot])
+#endif
 
 void wt_switch(void** save_esp, void* new_esp);
 __asm__(".text\n"
@@ -44,13 +52,14 @@ __asm__(".text\n"
 static void wt_thread_entry(void) {
     for (;;) {
         void (*entry)(void) = g_world_threads[g_world_thread_current_id].code_pointer;
+        g_ls_ignore_enter = 1;                                 /* (lockstep replay) retail enters a thread by returning into it: no call event */
         entry();
     }
 }
 
 static void wt_switch_to(s32 from, s32 to) {
     if (!g_wt_ctx[to].started) {
-        u32* top = (u32*)(g_wt_stacks[to] + WT_STACK_BYTES);
+        u32* top = (u32*)(WT_STACK(to) + WT_STACK_BYTES);
         top -= 5;
         *--top = (u32)wt_thread_entry;
         *--top = 0;                                            /* ebp */

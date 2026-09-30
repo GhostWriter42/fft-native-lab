@@ -16,7 +16,9 @@ typedef struct hle_platform {
     int (*read_sector)(void* ctx, unsigned lba, unsigned char* dst2048);        /* the 2048 data bytes of one CD sector; 0 = failed */
     void (*frame)(void* ctx);                                                   /* called after every VSync(0): a chance to yield to the comparison driver */
     void (*log)(void* ctx, const char* what, unsigned a0, unsigned a1, unsigned a2);   /* optional SDK call log */
+    int interp_reexec;                                                          /* the machine cannot yield inside an HLE call (the interpreter): a multi-blank VSync is re-executed once per blank */
     int (*is_overlay)(void* ctx, unsigned lba);                                 /* optional: 1 if a read starting at this sector loads a CODE overlay (the driver syncs first) */
+    int (*valid)(void* ctx, unsigned addr);                                     /* optional: 1 if the address can be read (default: the 2 MiB of RAM); guards the walk of GPU ordering tables */
 } hle_platform_t;
 
 /* A log of the calls a machine made into the HLE, in order (the platform-layer traffic: what a renderer / audio backend would be asked to do).
@@ -25,6 +27,12 @@ typedef struct hle_platform {
 #define HLE_TRACE_MAX 8192
 typedef struct hle_trace_entry { const char* name; unsigned a[5]; } hle_trace_entry_t;     /* a[4] = hash of the pointee of the first pointer argument (0 if none) */
 
+/* BIOS events (OpenEvent / TestEvent / DeliverEvent ...) as the memory-card code polls them */
+#define HLE_EVENTS 32
+typedef struct hle_event { unsigned desc, spec, used, enabled, ready; } hle_event_t;
+
+#define HLE_OTDUMPS 8
+#define HLE_OTDUMP_WORDS 4096
 typedef struct hle {
     hle_platform_t p;
     unsigned frame_counter;
@@ -38,10 +46,17 @@ typedef struct hle {
     unsigned sync_arg0, sync_arg1, sync_arg2;                                   /* overlay load: destination address, sector count, first sector */
     hle_trace_entry_t trace[HLE_TRACE_MAX];                                     /* this frame's HLE calls */
     unsigned trace_n, trace_lost;
-    int no_trace;                                                               /* set by the driver around calls that must not be logged */                                               /* entries in use / calls that did not fit */
+    int no_trace;                                                               /* set by the driver around calls that must not be logged */
+    unsigned vsync_left;                                                        /* blanks still owed by a VSync(n) call being re-executed (interp_reexec) */
+    int reexec;                                                                 /* set: the driver must re-execute the HLE call instead of returning from it */                                               /* entries in use / calls that did not fit */
+    hle_event_t ev[HLE_EVENTS];
     unsigned pad_mask;                                                          /* controller 1 buttons as PadRead() returns them (set by the driver's input script) */
+    unsigned bad_ot_addr, bad_ot_tag, bad_ot_head;                              /* first broken ordering-table chain seen: the tag word's address and value, and the table's head */
+    /* what the frame's first DrawOTag calls drew, for diagnosing a mismatch of their hashes: per call the packets as {address, length, words...} */
+    struct hle_otdump { unsigned trace_idx, n; unsigned w[HLE_OTDUMP_WORDS]; } otdump[HLE_OTDUMPS];
+    unsigned otdump_n;
 } hle_t;
-enum { HLE_SYNC_NONE = 0, HLE_SYNC_VSYNC = 1, HLE_SYNC_OVERLAY = 2 };
+enum { HLE_SYNC_NONE = 0, HLE_SYNC_VSYNC = 1, HLE_SYNC_OVERLAY = 2, HLE_SYNC_DIVERGED = 3 };
 
 void hle_init(hle_t* h, const hle_platform_t* p);
 /* Perform the SDK function `name` (it takes `nargs` parameters: the guest's other argument registers hold garbage and are zeroed) with the guest's first
@@ -61,6 +76,10 @@ unsigned hle_call(hle_t* h, const char* name, unsigned nargs, unsigned a0, unsig
  * compared without transliterating them first; their native versions are a separate verification job (harness_diff_asm.c). */
 #define HLE_SKIP_NAMES(X) \
     X(battle_map_queue_textured_triangles) X(battle_map_queue_textured_quads) X(battle_map_queue_untextured_triangles) X(battle_map_queue_untextured_quads) \
-    X(blit_text_glyph) X(battle_text_render_glyph_to_4bpp_image) X(world_text_blit_glyph) X(world_text_blit_font_glyph_to_4bpp)
+    X(blit_text_glyph) X(battle_text_render_glyph_to_4bpp_image) X(world_text_blit_glyph) X(world_text_blit_font_glyph_to_4bpp) \
+    X(open_movie_start_stream)
+
+/* open_movie_start_stream is skipped as well: it drives the CD streaming / MDEC hardware (not modelled by the HLE yet). Without it the FMV counts as
+ * instantly over (the movie-active flag it would set is never set), so the lockstep runs past the movies. */
 
 #endif

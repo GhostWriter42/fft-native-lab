@@ -67,4 +67,34 @@ PATCHES = [
         count=2,
         why='see battle_effect_try_init_data.c',
     ),
+    dict(
+        file='src/battle/battle_map_init_units_sprites_event_and_music.c',
+        old='        ((void (*)(void))main_sound_stop_sfx)();\n        battle_camera_init_defaults();',
+        new='        main_sound_stop_sfx(map_id);\n        battle_camera_init_defaults();',
+        why='step 0 calls main_sound_stop_sfx without loading its sound id, so it receives the function\'s own $a0 = map_id (still untouched: the '
+            'prologue only copies it to s1). Lockstep replay of the original at the first battle: main_sound_stop_sfx a0=0x3e = the map id; the '
+            'native call passed a stale stack word, matched an active SFX channel and released its voices (control flow diverged). The other '
+            'call site (step 11) leaves $a0 as whatever main_sound_unload_current_scenario_music ended with -- still unpatched.',
+    ),
+    dict(
+        file='src/battle/battle_unit_clear_status_staging_data.c',
+        old='void battle_unit_clear_status_staging_data(void) {\n    s32 i;\n',
+        new='void battle_unit_clear_status_staging_data(void) {\n    s32 i;\n    if (g_battle_unit_status_staging_data == 0) {\n        return;\n    }\n',
+        why='the first battle event runs this before battle_unit_update_staged_status_data has ever set the staging pointer (lockstep: '
+            'g_battle_unit_status_staging_data is still 0 at frame 1600, set only later), so retail stores zeros through a NULL base: into the '
+            'console\'s low RAM (KUSEG 0x39c..), i.e. the BIOS kernel area, which nothing here reads. Natively that address is unmapped '
+            '(SIGSEGV); the guard drops the store. (RAM outside the kernel area is unaffected.)',
+    ),
+    dict(
+        file='src/world/world_unit_clear_status_staging_data.c',
+        old='    s32 unit_index;\n\n    unit_index = 0;\n    do {\n        g_world_unit_status_staging_data->state[unit_index] = 0;',
+        new='    s32 unit_index;\n\n    if (g_world_unit_status_staging_data == 0) {\n        return;\n    }\n    unit_index = 0;\n    do {\n        g_world_unit_status_staging_data->state[unit_index] = 0;',
+        why='twin of battle_unit_clear_status_staging_data (same NULL-base store into the kernel area before the first update).',
+    ),
+    dict(
+        file='src/battle/battle_map_step_init_sequence.c',
+        old='        ((void (*)(void))main_sound_stop_sfx)();\n        step++;\n        battle_camera_init_defaults();',
+        new='        main_sound_stop_sfx(map_id);\n        step++;\n        battle_camera_init_defaults();',
+        why='same as battle_map_init_units_sprites_event_and_music.c step 0: $a0 is still the function\'s first parameter (map_id) at 0x8008eaa4.',
+    ),
 ]

@@ -34,6 +34,7 @@ typedef struct r3k {
     unsigned int wlog_n, wlog_pc[16], wlog_addr[16], wlog_val[16];
     unsigned int trace_calls, call_n, call_trace[1024];   /* targets of jal/jalr/j while trace_calls is set (debugging aid) */
     void (*call_hook)(struct r3k* c, unsigned int target);  /* optional: called when a traced jump target is REACHED (after its delay slot ran) */
+    void (*event_hook)(struct r3k* c, unsigned int target); /* optional: the same for EVERY traced jump target (call_hook stops at the first 1024) */
     unsigned int pending_call;          /* jump target waiting for its delay slot to finish */
     unsigned int ncode, code_lo[4096], code_hi[4096];   /* optional sorted code ranges: data loads from them are counted in code_reads */
     unsigned int code_reads, code_writes;
@@ -44,6 +45,9 @@ typedef struct r3k {
     int (*hle)(struct r3k* c, unsigned int addr);
     unsigned char hle_bitmap[0x200000 / 4 / 8];
     unsigned int hle_calls;
+    /* zero_frames: every stack frame is zero-filled when it is allocated (`addiu sp,sp,-N`), so locals the code never initialised read as 0 -- the same rule the
+     * native build gets from -ftrivial-auto-var-init=zero; the retail machine has whatever an earlier call left there, which the two builds cannot share. */
+    unsigned int zero_frames;
 } r3k_t;
 
 enum { R3K_OK = 0, R3K_FAULT_BAD_FETCH = 1, R3K_FAULT_UNSUPPORTED = 2, R3K_FAULT_UNALIGNED = 3, R3K_FAULT_TIMEOUT = 4,

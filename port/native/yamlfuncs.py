@@ -32,6 +32,21 @@ def documents(path):
     return out
 
 
+def modules(path):
+    """[(module name, header, lines)]: one code module per document. A single-document file is named after its file stem (main, battle, world ...);
+    the documents of a multi-document file (event.yaml, effect.yaml) after their `module:` field, made a C identifier (event-attack -> event_attack)."""
+    path = Path(path)
+    docs = documents(path)
+    if len(docs) == 1:
+        return [(path.stem, docs[0][1], docs[0][2])]
+    return [(re.sub(r'\W', '_', name), hdr, lines) for name, hdr, lines in docs]
+
+
+def parse_lines(lines):
+    """[(addr, size, name, asm)] of the lines of one document (see modules())"""
+    return _parse(lines)
+
+
 def _parse(lines):
     funcs, bare, hw = [], {}, {}
     for line in lines:

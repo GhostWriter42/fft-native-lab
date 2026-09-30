@@ -138,9 +138,44 @@ entry points) and the 54 BIOS tail veneers (`li t2,0xa0; jr t2; li t1,N` -- nati
 uses are provided by `bios_rt.c` with the same semantics as the interpreter's BIOS layer; anything else that has no native definition becomes a
 counting stub whose calls are reported (none in the boot).
 
-**Result: 445 frames (VSyncs) from `main()` to the first code-overlay load (OPEN/OPEN.BIN, LBA 86000), RAM identical at every one, zero stub calls.**
+**Result 1: 445 frames (VSyncs) from `main()` to the first code-overlay load (OPEN/OPEN.BIN, LBA 86000), RAM identical at every one, zero stub calls.**
 The boot covers the SN crt state, the logos, sound-driver initialisation, system-file loading (11 CD reads with the game's own sector/callback
 handling), the game loop and the soft-reset machinery.
+
+**Result 2 (overlays, input, platform traffic):** the lockstep now continues across code overlays. `gen_modules.py` writes a registry of the modules
+(main, battle, opening, wldcore, world; one entry per yaml document -- event.yaml has 11 and effect.yaml 110, one per overlay file) with their disc
+position, load address and function table. When a `CdRead` lands on a module's file the two machines stop, their RAM is compared, the module's
+functions get x86 trampolines (any module whose address range it overlaps is unloaded: its trampolines are restored from the interpreter's RAM, its HLE
+hooks are removed), its data ranges become part of the comparison and the run continues. With `-Scenario title` (the game loop is steered past the
+opening movie -- whose CD-streaming/MDEC hardware is not modelled -- by storing 5 into `g_main_system_frontend_world_result` right after
+`main_item_init_new_game_inventory`, on both machines) and a scripted controller (`-Pad 'frame:buttons,...'`), **the game boots, loads OPEN.BIN, shows
+its title menu, takes START, plays the new-game transition and loads WORLD.BIN for the name-entry screen -- 950 frames, RAM identical at every VSync
+and at both overlay loads, OPEN natively (150 of 150 functions) and WORLD natively (1,012 of 1,012)**.
+
+Everything the machines do at the platform boundary is compared too, not just RAM: the HLE keeps a per-frame log of its calls (`hle_trace_entry_t`) with
+each function's real argument count (`gen_hle.py` reads it from the SDK sources/headers; the other argument registers hold garbage) and pointer
+arguments replaced by the *content* they point at: RECT / DISPENV / DRAWENV / CdlLOC / SPU attribute structs and whole GPU ordering tables (the packet
+chain of `DrawOTag`, addresses excluded), stack pointers canonicalised. Calls the original makes from inside the natively replaced libgte (critical
+sections, `FlushCache`) have no native counterpart and are not logged. This is exactly the interface an HD renderer / audio backend will consume, so
+verifying it is verifying the port.
+
+What the higher-level HLE had to learn to get this far: `ClearOTagR`'s DMA channel (`_otc`), the BIOS event system (`OpenEvent`/`TestEvent`/
+`DeliverEvent`, 32 events) with a console that has **no memory card** (every card command is accepted and answered with the software-card TIMEOUT event --
+the game's card polling otherwise never terminates), and scripted `PadRead`. The native game runs on a stack **inside the RAM image** (top 64 KiB,
+like the console's) because code such as the name-entry screen builds GPU ordering tables from stack locals whose 24-bit addresses must stay valid.
+The render-only hand-written routines (BATTLE's four polygon queuers and two glyph blitters, WORLD's two blitters) are *skipped on both machines*
+(`HLE_SKIP_NAMES`): the interpreter never runs the original bytes and the native side gets a no-op, so the rest of the game can be compared before they
+are transliterated (they are the part the HD renderer replaces anyway).
+
+Tooling for finding the cause of a divergence (or hang): a watchdog reports a native frame that never reaches its next VSync with a backtrace;
+`-Watch sym,...` prints game variables as they change; `-Replay N` records the original's *function-call sequence* for frame N, then runs the native game
+under live comparison against it (the game is always compiled with `-finstrument-functions`, the hook is a no-op otherwise) and stops at the first call
+that differs -- or reports that the original itself never finishes the frame, with its registers; `-Dump N` / `-DumpAround fn` print the calls at the
+start of the frame / around a function.
+
+Open problem found with it: in the first frame of the WORLD name-entry screen the ORIGINAL code, on this HLE, spins in the window-frame display script
+(600,000+ calls without reaching VSync) -- the environment the HLE provides is not yet what that screen expects (text sections / thread state); not a
+native divergence.
 
 Ignored words (documented, not bugs): the kernel area below 0x8000f800 (the SDK's exception-vector patches -- the interpreter fakes the kernel
 tables), `g_psyq_crt_constructors_ran` and the `g_psyq_*_saved_ra` words (saved by hand-written SDK code; `__main` is not called natively), the thread

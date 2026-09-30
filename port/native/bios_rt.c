@@ -6,6 +6,7 @@
  * memchr 0x2e, rand 0x2f, srand 0x30. The yaml names of the veneers are the SDK names (memcpy's is psyq_api_memcpy). */
 
 unsigned g_bios_rand_seed = 1, g_bios_rand_calls;
+unsigned g_ls_ignore_enter;               /* lockstep replay: the next function entry is not a call event (a callback / thread started by the runtime) */
 
 int abs(int x) { return x < 0 ? -x : x; }                                     /* the game's C code calls it (-fno-builtin keeps it a real call) */
 

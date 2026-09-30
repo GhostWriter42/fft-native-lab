@@ -36,15 +36,52 @@ static unsigned fnv(hle_t* h, unsigned addr, unsigned len) {
 static unsigned rd32(hle_t* h, unsigned addr) {
     return h->p.r8(h->p.ctx, addr) | (h->p.r8(h->p.ctx, addr + 1) << 8) | (h->p.r8(h->p.ctx, addr + 2) << 16) | (h->p.r8(h->p.ctx, addr + 3) << 24);
 }
+static int ot_valid(hle_t* h, unsigned addr) {
+    if (h->p.valid) return h->p.valid(h->p.ctx, addr);
+    return addr >= 0x80000000u && addr < 0x80200000u;
+}
+/* the significant bits of word k (1 = the colour/command word) of a GPU packet whose command byte is `code`: the pad fields of the libgpu packet
+ * structs (the unused upper halves of the uv words of triangles/quads, the upper byte of the extra colour words) are whatever the caller's stack
+ * held, and the GPU ignores them */
+static unsigned ot_mask(unsigned code, unsigned k) {
+    switch (code & 0xfcu) {
+    case 0x24: if (k == 7) return 0x0000ffffu; break;                                  /* POLY_FT3 */
+    case 0x2c: if (k == 7 || k == 9) return 0x0000ffffu; break;                        /* POLY_FT4 */
+    case 0x30: if (k == 3 || k == 5) return 0x00ffffffu; break;                        /* POLY_G3 */
+    case 0x34: if (k == 4 || k == 7) return 0x00ffffffu; if (k == 9) return 0x0000ffffu; break;    /* POLY_GT3 */
+    case 0x38: if (k == 3 || k == 5 || k == 7) return 0x00ffffffu; break;              /* POLY_G4 */
+    case 0x3c: if (k == 4 || k == 7 || k == 10) return 0x00ffffffu; if (k == 9 || k == 12) return 0x0000ffffu; break;   /* POLY_GT4 */
+    case 0x50: if (k == 3) return 0x00ffffffu; break;                                  /* LINE_G2 */
+    }
+    return 0xffffffffu;
+}
 /* a GPU ordering table by CONTENT: every packet on the chain (its length and words), never the addresses (the two machines' stacks differ) */
 static unsigned hash_ot(hle_t* h, unsigned ot) {
     unsigned x = 2166136261u, addr = ot, guard = 0;
+    struct hle_otdump* d = h->otdump_n < HLE_OTDUMPS ? &h->otdump[h->otdump_n++] : 0;
+    if (d) { d->trace_idx = h->trace_n - 1; d->n = 0; }
     while (guard++ < 200000) {
-        unsigned tag = rd32(h, addr), len = tag >> 24, next = tag & 0x00ffffffu, k;
+        unsigned tag, len, next, k;
+        if (!ot_valid(h, addr)) {                                               /* the chain leaves memory: remember where (a corrupt table), and stop */
+            if (!h->bad_ot_addr) { h->bad_ot_addr = addr; h->bad_ot_head = ot; }
+            return x ^ 0xbad0bad0u;
+        }
+        tag = rd32(h, addr); len = tag >> 24; next = tag & 0x00ffffffu;
+        if (len && !ot_valid(h, addr + 4 * (len < 63u ? len : 63u))) { if (!h->bad_ot_addr) { h->bad_ot_addr = addr; h->bad_ot_tag = tag; h->bad_ot_head = ot; } return x ^ 0xbad0bad0u; }
         x = (x ^ len) * 16777619u;
-        for (k = 1; k <= len && k < 64; k++) x = (x ^ rd32(h, addr + 4 * k)) * 16777619u;
+        {
+            unsigned code = len ? rd32(h, addr + 4) >> 24 : 0;
+            if (d && d->n + 2 + (len < 63u ? len : 63u) <= HLE_OTDUMP_WORDS) d->w[d->n++] = addr, d->w[d->n++] = len;
+            else if (d) d = 0;
+            for (k = 1; k <= len && k < 64; k++) {
+                unsigned w = rd32(h, addr + 4 * k) & ot_mask(code, k);
+                if (d) d->w[d->n++] = w;
+                x = (x ^ w) * 16777619u;
+            }
+        }
         if (next == 0x00ffffffu) break;
         addr = 0x80000000u | next;
+        if (!ot_valid(h, addr)) { if (!h->bad_ot_addr) { h->bad_ot_addr = addr; h->bad_ot_tag = tag; h->bad_ot_head = ot; } return x ^ 0xbad0bad0u; }
     }
     return x;
 }
@@ -84,10 +121,25 @@ unsigned hle_call(hle_t* h, const char* n, unsigned nargs, unsigned a0, unsigned
     if (nargs < 3) a2 = 0;
     if (nargs < 2) a1 = 0;
     if (nargs < 1) a0 = 0;
-    h->calls++;
-    trace_call(h, n, a0, a1, a2, a3);
+    if (!(h->p.interp_reexec && h->vsync_left)) { h->calls++; trace_call(h, n, a0, a1, a2, a3); }      /* a re-executed VSync is one call */
     if (streq(n, "VSync")) {
-        if ((int)a0 == 0) {                                                     /* wait for the next vertical blank: run the game's own callback once */
+        /* VSync(0): wait for the next vertical blank; VSync(n >= 2): wait until n blanks have passed since the previous call (the machine does no work
+         * in zero time, so: n blanks); VSync(1) / VSync(-1): report, do not wait. Each blank runs the game's own vertical-blank callback. */
+        int mode = (int)a0;
+        unsigned frames = mode == 0 ? 1u : (mode >= 2 ? (unsigned)mode : 0u), k;
+        if (h->p.interp_reexec) {                                               /* one blank per execution; the driver comes back for the rest */
+            if (h->vsync_left) frames = h->vsync_left;
+            if (frames) {
+                h->frame_counter++;
+                if (h->cb_vsync) h->p.call(h->p.ctx, h->cb_vsync, 0, 0);
+                h->sync_reason = HLE_SYNC_VSYNC;
+                h->vsync_left = frames - 1;
+                h->reexec = h->vsync_left != 0;
+                if (h->p.frame) h->p.frame(h->p.ctx);
+            }
+            return h->frame_counter;
+        }
+        for (k = 0; k < frames; k++) {
             h->frame_counter++;
             if (h->cb_vsync) h->p.call(h->p.ctx, h->cb_vsync, 0, 0);
             h->sync_reason = HLE_SYNC_VSYNC;
@@ -143,8 +195,37 @@ unsigned hle_call(hle_t* h, const char* n, unsigned nargs, unsigned a0, unsigned
         if (a1) { unsigned b; for (b = 0; b < 4; b++) h->p.w8(h->p.ctx, a0 + b, b == 3 ? 0x00 : 0xff); }
         return a1;
     }
+    /* BIOS event system. Event handles are 0xf1000000 | (slot + 1). */
+    if (streq(n, "OpenEvent")) {
+        unsigned i;
+        for (i = 0; i < HLE_EVENTS; i++) if (!h->ev[i].used) { h->ev[i].used = 1; h->ev[i].desc = a0; h->ev[i].spec = a1; h->ev[i].enabled = 0; h->ev[i].ready = 0; return 0xf1000000u | (i + 1); }
+        return 0xffffffffu;
+    }
+    if (streq(n, "EnableEvent") || streq(n, "DisableEvent") || streq(n, "CloseEvent") || streq(n, "TestEvent") || streq(n, "WaitEvent")) {
+        unsigned i = (a0 & 0xffffffu) - 1, r = 0;
+        if ((a0 >> 24) == 0xf1 && i < HLE_EVENTS && h->ev[i].used) {
+            if (streq(n, "EnableEvent")) { h->ev[i].enabled = 1; r = 1; }
+            else if (streq(n, "DisableEvent")) { h->ev[i].enabled = 0; r = 1; }
+            else if (streq(n, "CloseEvent")) { h->ev[i].used = 0; r = 1; }
+            else { r = h->ev[i].ready; h->ev[i].ready = 0; }                    /* TestEvent / WaitEvent: consume the flag */
+        }
+        return r;
+    }
+    if (streq(n, "DeliverEvent") || streq(n, "UnDeliverEvent")) {
+        unsigned i;
+        for (i = 0; i < HLE_EVENTS; i++) if (h->ev[i].used && h->ev[i].desc == a0 && h->ev[i].spec == a1 && (h->ev[i].enabled || streq(n, "UnDeliverEvent"))) h->ev[i].ready = streq(n, "DeliverEvent");
+        return 1;
+    }
+    /* Memory cards: a console with NO card inserted. Every card command is accepted and answered with the software-card TIMEOUT event, which is what the BIOS
+     * delivers when nothing responds. (0xf4000001 = SwCARD, 0x0100 = EvSpTIMOUT.) */
+    if (streq(n, "_card_info") || streq(n, "_card_load") || streq(n, "_card_write") || streq(n, "_card_read") || streq(n, "_new_card")) {
+        unsigned i;
+        log_call(h, n, a0, a1, a2);
+        for (i = 0; i < HLE_EVENTS; i++) if (h->ev[i].used && h->ev[i].enabled && h->ev[i].desc == 0xf4000001u && h->ev[i].spec == 0x0100u) h->ev[i].ready = 1;
+        return 1;
+    }
     if (streq(n, "PadRead")) return h->pad_mask;                                 /* the scripted controller state (PSX_PAD_*: START 0x800, CROSS 0x40, CIRCLE 0x20, ...) */
-    if (streq(n, "DrawSync") || streq(n, "TestEvent")) return 0;
+    if (streq(n, "DrawSync")) return 0;
     log_call(h, n, a0, a1, a2);
     return 0;
 }

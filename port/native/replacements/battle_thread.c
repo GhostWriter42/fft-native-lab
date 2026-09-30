@@ -14,9 +14,9 @@
  * Replaces src/battle/battle_thread_start.c (it must also reset the slot's native context). */
 #include "fft/battle.h"
 #include "psx/types.h"
+extern unsigned g_ls_ignore_enter;
 
 #define NT_SLOTS NATIVE_THREAD_SLOT_COUNT
-#define NT_STACK_BYTES 0x40000
 
 typedef struct nt_ctx {
     void* esp;          /* saved stack pointer while the slot is not running */
@@ -24,7 +24,15 @@ typedef struct nt_ctx {
 } nt_ctx_t;
 
 static nt_ctx_t g_nt_ctx[NT_SLOTS] = { { 0, 1 } };            /* slot 0 = the running main context */
+#ifdef LOCKSTEP_THREAD_WINDOW                                 /* whole-program lockstep: the stacks sit in the mapped window above RAM (thread_window.h) */
+#include "thread_window.h"
+#define NT_STACK_BYTES THREAD_STACK_BYTES
+#define NT_STACK(slot) ((unsigned char*)(THREAD_STACK_WINDOW + (unsigned)(slot) * THREAD_STACK_BYTES))
+#else
+#define NT_STACK_BYTES 0x40000
 static unsigned char g_nt_stacks[NT_SLOTS][NT_STACK_BYTES] __attribute__((aligned(16)));
+#define NT_STACK(slot) (g_nt_stacks[slot])
+#endif
 
 /* void nt_switch(void** save_esp, void* new_esp): push the callee-saved registers, store esp, load the other esp, pop, return. */
 void nt_switch(void** save_esp, void* new_esp);
@@ -50,13 +58,14 @@ __asm__(".text\n"
 static void nt_thread_entry(void) {
     for (;;) {
         void (*entry)(void) = g_battle_threads[g_battle_current_thread_id].code_pointer;
+        g_ls_ignore_enter = 1;                                 /* (lockstep replay) retail enters a thread by returning into it: no call event */
         entry();
     }
 }
 
 static void nt_switch_to(s32 from, s32 to) {
     if (!g_nt_ctx[to].started) {
-        u32* top = (u32*)(g_nt_stacks[to] + NT_STACK_BYTES);
+        u32* top = (u32*)(NT_STACK(to) + NT_STACK_BYTES);
         top -= 5;                                              /* padding keeps esp 16-byte aligned + 4 at nt_thread_entry */
         *--top = (u32)nt_thread_entry;                         /* nt_switch's `ret` */
         *--top = 0;                                            /* ebp */

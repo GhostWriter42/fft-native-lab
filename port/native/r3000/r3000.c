@@ -90,7 +90,7 @@ void r3k_reset(r3k_t* c, unsigned char* ram) {
     c->sp_top = 0x801fff00u;
     c->steps = 0; c->io_reads = c->io_writes = c->io_last_addr = 0; c->syscalls = c->bios_calls = c->rand_calls = 0;
     c->fault = 0; c->fault_pc = c->fault_instr = c->fault_addr = 0;
-    c->ncode = c->code_reads = c->code_writes = c->wild = c->nsdk = c->sdk_hits = 0; c->hle = 0; c->hle_calls = 0; { unsigned int q; for (q = 0; q < sizeof c->hle_bitmap; q++) c->hle_bitmap[q] = 0; } c->trace_calls = c->call_n = 0; c->call_hook = 0; c->pending_call = 0; c->cur_pc = 0; c->div_zero = c->div_overflow = 0; c->watch_lo = c->watch_hi = 0; c->wlog_n = 0;
+    c->ncode = c->code_reads = c->code_writes = c->wild = c->nsdk = c->sdk_hits = 0; c->hle = 0; c->hle_calls = 0; { unsigned int q; for (q = 0; q < sizeof c->hle_bitmap; q++) c->hle_bitmap[q] = 0; } c->trace_calls = c->call_n = 0; c->call_hook = 0; c->event_hook = 0; c->pending_call = 0; c->cur_pc = 0; c->div_zero = c->div_overflow = 0; c->watch_lo = c->watch_hi = 0; c->wlog_n = 0;
 }
 
 /* BIOS A-table entries that the game's C code reaches through the libc stubs (e.g. rand at 0x8002230c: li t2,0xa0; jr t2; li t1,0x2f). */
@@ -148,6 +148,7 @@ static int step(r3k_t* c) {
     if (c->pending_call && cur == c->pending_call) {                                  /* a traced call has just been entered (its delay slot has run) */
         c->pending_call = 0;
         if (c->call_n < 1024) { c->call_trace[c->call_n++] = cur; if (c->call_hook) c->call_hook(c, cur); }
+        if (c->event_hook) c->event_hook(c, cur);
     }
     if (c->hle && phys < 0x200000u) {                                                  /* intercepted function entry */
         unsigned int w = phys >> 2;
@@ -230,7 +231,12 @@ static int step(r3k_t* c) {
     case 6: BRANCH((int)a <= 0); break;
     case 7: BRANCH((int)a > 0); break;
     case 8: v = a + (unsigned int)SIGN16(imm); if (((a ^ v) & ((unsigned int)SIGN16(imm) ^ v)) >> 31) { set_fault(c, R3K_FAULT_OVERFLOW, cur, ins, 0); return 1; } SETR(rt, v); break;
-    case 9: SETR(rt, a + (unsigned int)SIGN16(imm)); break;
+    case 9:
+        if (c->zero_frames && rt == 29 && rs == 29 && (imm & 0x8000u)) {                    /* a new stack frame: zero it (see r3k_t.zero_frames) */
+            unsigned int lo = a + (unsigned int)SIGN16(imm), n = a - lo;
+            if (lo >= 0x80000000u && a <= 0x80200000u && n <= 0x4000u) { unsigned char* z = c->ram + (lo & 0x1fffffu); unsigned int q; for (q = 0; q < n; q++) z[q] = 0; }
+        }
+        SETR(rt, a + (unsigned int)SIGN16(imm)); break;
     case 10: SETR(rt, (int)a < SIGN16(imm)); break;
     case 11: SETR(rt, a < (unsigned int)SIGN16(imm)); break;
     case 12: SETR(rt, a & imm); break;
