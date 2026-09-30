@@ -25,9 +25,13 @@ typedef struct r3k {
     unsigned long long steps;           /* instructions executed since reset */
     unsigned int io_reads, io_writes;   /* accesses outside RAM/scratchpad */
     unsigned int io_last_addr;
-    unsigned int syscalls, bios_calls;
+    unsigned int syscalls, bios_calls, rand_calls;
     int fault;                          /* 0 = ok; see R3K_FAULT_* */
     unsigned int fault_pc, fault_instr, fault_addr;
+    unsigned int cur_pc;                /* address of the instruction being executed */
+    unsigned int div_zero, div_overflow;/* divisions by zero / INT_MIN / -1 seen (defined on MIPS, traps on x86) */
+    unsigned int watch_lo, watch_hi;    /* writes to [watch_lo, watch_hi) are logged (debugging aid; empty by default) */
+    unsigned int wlog_n, wlog_pc[16], wlog_addr[16], wlog_val[16];
 } r3k_t;
 
 enum { R3K_OK = 0, R3K_FAULT_BAD_FETCH = 1, R3K_FAULT_UNSUPPORTED = 2, R3K_FAULT_UNALIGNED = 3, R3K_FAULT_TIMEOUT = 4,

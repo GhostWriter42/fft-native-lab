@@ -45,5 +45,9 @@ if out_c:
     for i, n in used:
         lines.append(f'    [{i}] = {n},')
     lines.append('};')
+    lines.append(f'const char* {native}_names[{count}] = {{')
+    for i, n in used:
+        lines.append(f'    [{i}] = "{n}",')
+    lines.append('};')
     Path(out_c).write_text('\n'.join(lines) + '\n')
     print(f'wrote {out_c}: {len(used)} handlers')

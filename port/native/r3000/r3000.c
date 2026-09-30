@@ -30,18 +30,24 @@ static unsigned int rd32(r3k_t* c, unsigned int a) {
     if (!p) { c->io_reads++; c->io_last_addr = a; return 0; }
     return *(unsigned int*)p;
 }
+static void wlog(r3k_t* c, unsigned int a, unsigned int v) {
+    if (a >= c->watch_lo && a < c->watch_hi && c->wlog_n < 16) { c->wlog_pc[c->wlog_n] = c->cur_pc; c->wlog_addr[c->wlog_n] = a; c->wlog_val[c->wlog_n] = v; c->wlog_n++; }
+}
 static void wr8(r3k_t* c, unsigned int a, unsigned int v) {
     unsigned char* p = mp(c, a);
+    wlog(c, a, v);
     if (!p) { c->io_writes++; c->io_last_addr = a; return; }
     *p = (unsigned char)v;
 }
 static void wr16(r3k_t* c, unsigned int a, unsigned int v) {
     unsigned char* p = mp(c, a);
+    wlog(c, a, v);
     if (!p) { c->io_writes++; c->io_last_addr = a; return; }
     *(unsigned short*)p = (unsigned short)v;
 }
 static void wr32(r3k_t* c, unsigned int a, unsigned int v) {
     unsigned char* p = mp(c, a);
+    wlog(c, a, v);
     if (!p) { c->io_writes++; c->io_last_addr = a; return; }
     *(unsigned int*)p = v;
 }
@@ -57,8 +63,9 @@ void r3k_reset(r3k_t* c, unsigned char* ram) {
     for (i = 0; i < 1024; i++) c->scratch[i] = 0;
     c->bios_rand_seed = 1;
     c->sp_top = 0x801fff00u;
-    c->steps = 0; c->io_reads = c->io_writes = c->io_last_addr = 0; c->syscalls = c->bios_calls = 0;
+    c->steps = 0; c->io_reads = c->io_writes = c->io_last_addr = 0; c->syscalls = c->bios_calls = c->rand_calls = 0;
     c->fault = 0; c->fault_pc = c->fault_instr = c->fault_addr = 0;
+    c->cur_pc = 0; c->div_zero = c->div_overflow = 0; c->watch_lo = c->watch_hi = 0; c->wlog_n = 0;
 }
 
 /* BIOS A-table entries that the game's C code reaches through the libc stubs (e.g. rand at 0x8002230c: li t2,0xa0; jr t2; li t1,0x2f). */
@@ -87,7 +94,7 @@ static int bios_call(r3k_t* c, unsigned int table) {
         c->r[2] = 0;
         for (i = 0; i < a2; i++) { unsigned int x = rd8(c, a0 + i), y = rd8(c, a1 + i); if (x != y) { c->r[2] = x < y ? 0xffffffffu : 1u; break; } }
         break;
-    case 0x2f: c->bios_rand_seed = c->bios_rand_seed * 1103515245u + 12345u; c->r[2] = (c->bios_rand_seed >> 16) & 0x7fffu; break;   /* rand */
+    case 0x2f: c->rand_calls++; c->bios_rand_seed = c->bios_rand_seed * 1103515245u + 12345u; c->r[2] = (c->bios_rand_seed >> 16) & 0x7fffu; break;   /* rand */
     case 0x30: c->bios_rand_seed = a0; break;                                                 /* srand */
     default: set_fault(c, R3K_FAULT_BIOS, c->pc, fn, table); return 1;
     }
@@ -109,6 +116,7 @@ static int step(r3k_t* c) {
     ip = mp(c, cur);
     if ((cur & 3u) || !ip) { set_fault(c, R3K_FAULT_BAD_FETCH, cur, 0, cur); return 1; }
     ins = *(unsigned int*)ip;
+    c->cur_pc = cur;
     c->pc = c->npc; c->npc = c->npc + 4;                       /* pc now addresses the delay slot; a taken branch replaces npc */
     c->steps++;
     c->ld_reg = 0;
@@ -138,12 +146,12 @@ static int step(r3k_t* c) {
         case 0x18: { long long p = (long long)(int)a * (long long)(int)b; c->lo = (unsigned int)p; c->hi = (unsigned int)((unsigned long long)p >> 32); } break;
         case 0x19: { unsigned long long p = (unsigned long long)a * (unsigned long long)b; c->lo = (unsigned int)p; c->hi = (unsigned int)(p >> 32); } break;
         case 0x1a:
-            if (b == 0) { c->lo = (int)a < 0 ? 1u : 0xffffffffu; c->hi = a; }
-            else if (a == 0x80000000u && b == 0xffffffffu) { c->lo = 0x80000000u; c->hi = 0; }
+            if (b == 0) { c->div_zero++; c->lo = (int)a < 0 ? 1u : 0xffffffffu; c->hi = a; }
+            else if (a == 0x80000000u && b == 0xffffffffu) { c->div_overflow++; c->lo = 0x80000000u; c->hi = 0; }
             else { c->lo = (unsigned int)((int)a / (int)b); c->hi = (unsigned int)((int)a % (int)b); }
             break;
         case 0x1b:
-            if (b == 0) { c->lo = 0xffffffffu; c->hi = a; }
+            if (b == 0) { c->div_zero++; c->lo = 0xffffffffu; c->hi = a; }
             else { c->lo = a / b; c->hi = a % b; }
             break;
         case 0x20: v = a + b; if (((a ^ v) & (b ^ v)) >> 31) { set_fault(c, R3K_FAULT_OVERFLOW, cur, ins, 0); return 1; } SETR(rd, v); break;
