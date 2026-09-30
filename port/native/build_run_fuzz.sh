@@ -13,7 +13,7 @@ A=/port/build/native/all_pc
 N=/port/build/native
 P=/port/build/portable/src/psyq/libgte
 FN=$N/fn_names.txt
-CF="-m32 -O1 -w -std=gnu89 -funsigned-char -fcommon -ffreestanding -fno-builtin -fno-pic -fno-pie -fno-stack-protector -fno-strict-aliasing -fno-aggressive-loop-optimizations -fwrapv -nostdinc -I/port/native/shim -I/port/native/gte -I/port/build/portable/include -I/port/native -include psx/gte_inline.h -DPC_SCHEME $EXTRA_CFLAGS"
+CF="-m32 -O1 -w -std=gnu89 -funsigned-char -fcommon -ffreestanding -fno-builtin -fno-pic -fno-pie -fno-stack-protector -fno-strict-aliasing -fno-aggressive-loop-optimizations -fwrapv -nostdinc -I/port/native/shim -I/port/native/gte -I/port/build/portable/include -I/port/native -I/port/build/native -include psx/gte_inline.h -DPC_SCHEME $EXTRA_CFLAGS"
 rename_defs() {   # rename defined yaml-function symbols of object $1 to native_<name>
   nm --defined-only -g "$1" | awk '{print $3}' | grep -Fxf "$FN" | awk '{print $1" native_"$1}' > "$1.map" || true
   [ -s "$1.map" ] && objcopy --redefine-syms="$1.map" "$1"
@@ -28,7 +28,7 @@ for s in /port/native/gte/libgte_native.c $P/rsin.c $P/sin_1.c $P/rcos.c $P/rata
   rename_defs "$o"
 done
 # oracle, GTE, tables, harness: their own names stay as they are (the harness defines native_rand & co. itself)
-for s in /port/native/gte/gte.c /port/native/r3000/r3000.c $N/func_addrs.c $N/stub_table.c $N/fuzz_table.c $N/sym_table.c $N/sdk_ranges.c /port/native/harness_fuzz.c; do
+for s in /port/native/gte/gte.c /port/native/r3000/r3000.c $N/func_addrs.c $N/stub_table.c $N/fuzz_table.c $N/sym_table.c $N/sdk_ranges.c $N/seed_globals.c $N/unspecified_ret.c /port/native/harness_fuzz.c; do
   gcc $CF -c "$s" -o "$W/x_$(basename "$s" .c).o"
 done
 gcc $CF -fno-tree-loop-distribute-patterns -c /port/native/rt.c -o $W/x_rt.o

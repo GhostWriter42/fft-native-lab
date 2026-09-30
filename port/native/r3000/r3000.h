@@ -39,6 +39,11 @@ typedef struct r3k {
     unsigned int code_reads, code_writes;
     unsigned int wild;                  /* data accesses that a native build cannot reach: KUSEG/KSEG1 aliases, mirrors above 2 MiB, scratchpad */
     unsigned int nsdk, sdk_lo[16], sdk_hi[16], sdk_hits;   /* optional SDK ranges: calls/jumps into them are counted */
+    /* HLE: code addresses (function entries) whose execution is intercepted -- hle(c, addr) runs INSTEAD of the function and its
+     * return is then taken through $ra. Arguments are in a0-a3 / the stack, the result goes to v0. hle_bitmap: 1 bit per word of RAM. */
+    int (*hle)(struct r3k* c, unsigned int addr);
+    unsigned char hle_bitmap[0x200000 / 4 / 8];
+    unsigned int hle_calls;
 } r3k_t;
 
 enum { R3K_OK = 0, R3K_FAULT_BAD_FETCH = 1, R3K_FAULT_UNSUPPORTED = 2, R3K_FAULT_UNALIGNED = 3, R3K_FAULT_TIMEOUT = 4,
@@ -47,9 +52,15 @@ enum { R3K_OK = 0, R3K_FAULT_BAD_FETCH = 1, R3K_FAULT_UNSUPPORTED = 2, R3K_FAULT
 #define R3K_SENTINEL 0xfffffff0u        /* return address planted in $ra by r3k_call */
 
 void r3k_reset(r3k_t* c, unsigned char* ram);
+void r3k_hle_add(r3k_t* c, unsigned int addr);                    /* intercept the function whose first instruction is at addr */
 /* Call the function at `addr` with up to 8 integer arguments (a0-a3 then the stack, as the o32 ABI does).
  * Returns R3K_OK if it returned to the sentinel; the result is c->r[2] (and c->r[3]). */
 int r3k_call(r3k_t* c, unsigned int addr, const unsigned int* args, int nargs, unsigned long long max_steps);
+/* Run from the current pc until it reaches R3K_SENTINEL (the caller plants the return address). */
+int r3k_run(r3k_t* c, unsigned long long max_steps);
+/* Call guest code from inside an HLE handler: the register file, hi/lo, pc and load-delay state are saved and restored around the
+ * call; the callee's stack frame is carved out below the current $sp. Returns the callee's $v0. */
+unsigned int r3k_call_nested(r3k_t* c, unsigned int addr, const unsigned int* args, int nargs, unsigned long long max_steps);
 
 unsigned int r3k_read32(r3k_t* c, unsigned int addr);
 void r3k_write32(r3k_t* c, unsigned int addr, unsigned int value);

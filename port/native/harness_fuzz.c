@@ -91,19 +91,27 @@ extern const int g_orig_func_count;
 
 enum { K_S8 = 1, K_U8, K_S16, K_U16, K_S32, K_U32, K_PTR };
 
+extern const unsigned int g_ptr_globals[];
+extern const int g_ptr_global_count;
+struct scalar_global { unsigned int addr; unsigned char kind; };
+extern const struct scalar_global g_scalar_globals[];
+extern const int g_scalar_global_count;
+
 /* ------------------------------------------------------------------------------------------------- random */
 static unsigned g_rng = 2463534242u;
 static unsigned rnd(void) { g_rng ^= g_rng << 13; g_rng ^= g_rng >> 17; g_rng ^= g_rng << 5; return g_rng; }
 
 #define WIN_LO 0x801e0000u                       /* scratch window: argument buffers + targets for pointer-like words */
 #define WIN_HI 0x801f0000u                       /* [0x801f0000, 0x80200000) is the interpreter's stack: never compared */
-#define BUF_STRIDE 0x1000u
-#define BUF_WORDS_LIMIT 0xa000u                  /* pointer-like words point into the first 40 KiB of the window */
+#define BUF_STRIDE 0x400u                        /* argument buffers: 10 x 1 KiB at the start of the window */
+#define BUF_WORDS_LIMIT 0x10000u                 /* pointer-like words point anywhere into the 64 KiB window */
+#define POOL_LO (WIN_LO + 10 * BUF_STRIDE)       /* pointees of the seeded pointer globals: 256 bytes each */
+#define POOL_STRIDE 0x100u
 
 /* ---------------------------------------------------------------------------- the two machines and their RAM */
 static unsigned char interp_ram[0x200000];
 static r3k_t cpu;
-struct result { unsigned ndiff, marker, addr[40], nat[40], orig[40], fault_addr, fault_eip, fault_sig, ret_native, stub_calls, rand_calls; };
+struct result { unsigned ndiff, marker, addr[40], nat[40], orig[40], fault_addr, fault_eip, fault_sig, ret_native, stub_calls, rand_calls, trace_on, trace_n, trace[1000], trace_hash[1000]; };
 static struct result* shared;
 static unsigned data_lo[6000], data_hi[6000];
 static int ndata, n_installed;
@@ -118,7 +126,7 @@ static void build_ranges_and_install(void) {
         const struct native_stub* f = &g_native_stubs[idx[i]];
         if (f->ps1_addr >= 0x801f0000u) continue;
         if (f->ps1_addr > cursor) { data_lo[ndata] = cursor; data_hi[ndata] = f->ps1_addr; ndata++; }
-        if (cpu.ncode && f->ps1_addr - cpu.code_hi[cpu.ncode - 1] <= 16 && f->ps1_addr >= cpu.code_hi[cpu.ncode - 1]) cpu.code_hi[cpu.ncode - 1] = f->ps1_addr + f->size;
+        if (cpu.ncode && f->ps1_addr <= cpu.code_hi[cpu.ncode - 1] + 16) { if (f->ps1_addr + f->size > cpu.code_hi[cpu.ncode - 1]) cpu.code_hi[cpu.ncode - 1] = f->ps1_addr + f->size; }   /* adjacent or overlapping: merge */
         else if (cpu.ncode < 4096) { cpu.code_lo[cpu.ncode] = f->ps1_addr; cpu.code_hi[cpu.ncode] = f->ps1_addr + f->size; cpu.ncode++; }
         if (f->ps1_addr + f->size > cursor) cursor = f->ps1_addr + f->size;
         if (f->native && f->size >= 5) {
@@ -148,6 +156,15 @@ static void copy_ram_to_interp_all(void) {
     void* d = interp_ram; const void* s = (const void*)0x80000000;
     __asm__ volatile("rep movsl" : "+D"(d), "+S"(s), "+c"(n) : : "memory");
 }
+/* RAM words that legitimately differ: the retail thread switch saves s0-s7/k0/k1/gp/sp/fp/ra into each thread record (+0x10..+0x47),
+ * the native scheduler keeps its machine context outside RAM (see replacements/battle_thread.c); the call-on-main-stack routine
+ * parks $ra in a word after its own code. */
+extern char g_battle_thread_contexts[];
+static int __attribute__((no_instrument_function)) ignored_word(unsigned a) {
+    unsigned base = (unsigned)g_battle_thread_contexts;
+    if (a >= base && a < base + 16 * 0x400) { unsigned off = (a - base) & 0x3ff; if (off >= 0x10 && off < 0x48) return 1; }
+    return a == 0x8014cf5cu;
+}
 static void fault_handler(int sig, void* info, void* uc) {
     shared->fault_sig = (unsigned)sig;
     shared->fault_addr = *(unsigned*)((char*)info + 12);
@@ -166,6 +183,7 @@ static void install_fault_handlers(void) {
 static void label(unsigned a) {
     int lo = 0, hi = g_sym_count, i;
     if (a >= WIN_LO && a < WIN_LO + 10 * BUF_STRIDE) { out("buffer["); outnum((a - WIN_LO) / BUF_STRIDE); out("]+0x"); outhex((a - WIN_LO) % BUF_STRIDE); return; }
+    if (a >= POOL_LO && a < POOL_LO + (unsigned)g_ptr_global_count * POOL_STRIDE) { out("pointee["); outnum((a - POOL_LO) / POOL_STRIDE); out("]+0x"); outhex((a - POOL_LO) % POOL_STRIDE); return; }
     while (lo < hi) { int mid = (lo + hi) / 2; if (g_syms[mid].addr <= a) lo = mid + 1; else hi = mid; }
     i = lo - 1;
     if (i >= 0 && a - g_syms[i].addr < 0x4000) { out(g_syms[i].name); out("+0x"); outhex(a - g_syms[i].addr); return; }
@@ -232,10 +250,41 @@ static unsigned mask_ret(int kind, unsigned v) {
 
 typedef unsigned (*gen10_t)(unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned);
 
+/* Every trial starts from the pristine disc image (data ranges only: the code ranges hold the trampolines). */
+static void restore_native_data(void) {
+    int i;
+    for (i = 0; i < ndata; i++) {
+        unsigned n = (data_hi[i] - data_lo[i]) / 4;
+        void* d = (void*)data_lo[i]; const void* src = pristine_ram + (data_lo[i] & 0x1fffff);
+        __asm__ volatile("rep movsl" : "+D"(d), "+S"(src), "+c"(n) : : "memory");
+    }
+}
+
+static void seed_globals(void) {
+    int i;
+    for (i = 0; i < g_ptr_global_count; i++) {                                    /* pointer globals -> their own random pointee buffer */
+        unsigned pool = POOL_LO + (unsigned)i * POOL_STRIDE, k;
+        for (k = 0; k < POOL_STRIDE; k += 4) {
+            unsigned m = rnd() & 3;
+            *(unsigned*)(pool + k) = m == 0 ? WIN_LO + ((rnd() % BUF_WORDS_LIMIT) & ~3u) : (m == 1 ? (rnd() & 0xff) : rnd());
+        }
+        if (rnd() % 12) *(unsigned*)g_ptr_globals[i] = pool + (rnd() % 4) * 4;
+    }
+    for (i = 0; i < g_scalar_global_count; i++) {                                  /* a few scalar globals -> random values */
+        if (rnd() % 8 == 0) {
+            unsigned v = gen_scalar(g_scalar_globals[i].kind), a = g_scalar_globals[i].addr;
+            if (g_scalar_globals[i].kind == K_S8 || g_scalar_globals[i].kind == K_U8) *(unsigned char*)a = (unsigned char)v;
+            else if (g_scalar_globals[i].kind == K_S16 || g_scalar_globals[i].kind == K_U16) *(unsigned short*)a = (unsigned short)v;
+            else *(unsigned*)a = v;
+        }
+    }
+}
+
 static void setup_trial(int fi, int t, unsigned* args) {
     const struct fuzz_fn* f = &g_fuzz_fns[fi];
     int i;
     g_rng = ((unsigned)(fi + 1) * 2654435761u) ^ ((unsigned)(t + 1) * 2246822519u); g_rng |= 1; rnd(); rnd(); rnd();       /* replayable from (function, trial) */
+    restore_native_data();
     for (i = 0; i < 10; i++) args[i] = 0;
     for (i = 0; i < f->nargs; i++) {
         if (f->kind[i] == K_PTR) {
@@ -247,7 +296,12 @@ static void setup_trial(int fi, int t, unsigned* args) {
         }
     }
     random_gte();
+    seed_globals();
 }
+
+#if defined(ONLY_FN) || defined(REPLAY_LIST_FILE)
+#include "harness_fuzz_replay.h"
+#endif
 
 /* ------------------------------------------------------------------------------------------------- the run */
 /* Functions whose result IS a CPU register ($sp / $gp): meaningless natively, not a divergence. */
@@ -259,13 +313,35 @@ static int known_incompatible(const char* n) {
     return 0;
 }
 
+extern const char* const g_unspecified_ret[];          /* functions that can fall off the end of a non-void function (unspecified result) */
+static int unspecified_ret(const char* n) {
+    int i;
+    for (i = 0; g_unspecified_ret[i]; i++) if (streq(n, g_unspecified_ret[i])) return 1;
+    return 0;
+}
+
 int main_test(void) {
     int fi, t, total_fn = 0, tested_fn = 0, untested_fn = 0, nonnative = 0, bad_fn = 0, known_skipped = 0;
-    long total_cmp = 0, total_bad = 0, total_skip = 0;
+    long total_cmp = 0, total_bad = 0, total_skip = 0, total_unspec = 0;
     static gte_state_t gte_before;
+#ifdef ONLY_FN
+    replay_one(ONLY_FN, ONLY_TRIAL);
+    return 0;
+#endif
+#ifdef REPLAY_LIST_FILE
+    {
+        static const int rl[][2] = {
+#include "replay_list.h"
+        };
+        int q;
+        for (q = 0; q < (int)(sizeof rl / sizeof rl[0]); q++) { out("=========================================================================
+"); replay_one(rl[q][0], rl[q][1]); }
+        return 0;
+    }
+#endif
     for (fi = FROM; fi < g_fuzz_fn_count && fi < TO; fi++) {
         const struct fuzz_fn* f = &g_fuzz_fns[fi];
-        int cmp = 0, mism = 0, crashes = 0, div_traps = 0, stub_paths = 0, shown = 0;
+        int cmp = 0, mism = 0, crashes = 0, div_traps = 0, stub_paths = 0, shown = 0, unspec = 0;
         int sk_fault = 0, sk_io = 0, sk_code = 0, sk_wild = 0, sk_sdk = 0;
         unsigned crash_eip = 0, crash_addr = 0, crash_sig = 0;
         total_fn++;
@@ -284,7 +360,7 @@ int main_test(void) {
 #ifdef WATCH_ADDR
             out("      watch: native "); outhex(*(unsigned*)WATCH_ADDR); out(" interp "); outhex(*(unsigned*)(interp_ram + (WATCH_ADDR & 0x1fffff))); out("\n");
 #endif
-            { int q; unsigned n = 0x4000 / 4; void* d = interp_ram + ((cpu.sp_top - 0x4000 + 0x40) & 0x1fffff); for (q = 1; q < 32; q++) cpu.r[q] = 0; cpu.hi = cpu.lo = 0;
+            { int q; unsigned n = 0x10000 / 4; void* d = interp_ram + 0x1f0000;                    /* the whole stack region, so copies that run past the window read zeros on both machines */ for (q = 1; q < 32; q++) cpu.r[q] = 0; cpu.hi = cpu.lo = 0;
       __asm__ volatile("rep stosl" : "+D"(d), "+c"(n) : "a"(0) : "memory"); }   /* no stale registers or stack: every trial starts clean */
             rc = r3k_call(&cpu, f->addr, args, f->nargs, MAX_STEPS);
             g_gte = gte_before;
@@ -310,7 +386,7 @@ int main_test(void) {
                 for (rg = 0; rg < ndata; rg++)
                     for (a = data_lo[rg]; a < data_hi[rg]; a += 4) {
                         unsigned x = *(unsigned*)a, y = *(unsigned*)(interp_ram + (a & 0x1fffff));
-                        if (x != y) { if (n < 40) { shared->addr[n] = a; shared->nat[n] = x; shared->orig[n] = y; } n++; }
+                        if (x != y && !ignored_word(a)) { if (n < 40) { shared->addr[n] = a; shared->nat[n] = x; shared->orig[n] = y; } n++; }
                     }
                 shared->ndiff = n; shared->stub_calls = g_stub_calls; shared->marker = 0xd0d0d0d0u;
                 sys3(1, 0, 0, 0);
@@ -324,6 +400,7 @@ int main_test(void) {
                 continue;
             }
             if (shared->stub_calls) stub_paths++;
+            if (!shared->ndiff && f->ret != 0 && shared->ret_native != ret_i && unspecified_ret(f->name)) { unspec++; continue; }   /* only the unspecified return value differs */
             if (shared->ndiff || (f->ret != 0 && shared->ret_native != ret_i)) {
                 unsigned k;
                 mism++;
@@ -345,6 +422,7 @@ int main_test(void) {
         }
         total_cmp += cmp; total_bad += mism + crashes; total_skip += sk_fault + sk_io + sk_code + sk_wild + sk_sdk;
         if (cmp) tested_fn++; else untested_fn++;
+        total_unspec += unspec;
         if (mism || crashes || stub_paths) {
             bad_fn++;
             out(mism || crashes ? "DIVERGES " : "STUB-PATH "); outnum(fi); out(" "); out(f->name); out(": "); outnum(cmp); out(" compared, "); outnum(mism); out(" mismatches, "); outnum(crashes); out(" native crashes");
@@ -356,7 +434,8 @@ int main_test(void) {
     }
     out("== functions: "); outnum(total_fn); out(" considered, "); outnum(tested_fn); out(" compared at least once, "); outnum(untested_fn); out(" never got a usable trial, ");
     outnum(nonnative); out(" not linked natively, "); outnum(known_skipped); out(" known CPU-register functions skipped. Trials: "); outnum(total_cmp); out(" compared, "); outnum(total_skip); out(" skipped; ");
-    outnum(bad_fn); out(" functions flagged ("); outnum(total_bad); out(" mismatching or crashing trials)\n");
+    outnum(bad_fn); out(" functions flagged ("); outnum(total_bad); out(" mismatching or crashing trials); ");
+    outnum(total_unspec); out(" more trials differed only in the unspecified return value of a function that can fall off its end\n");
     return total_bad != 0;
 }
 
