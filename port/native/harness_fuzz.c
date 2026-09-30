@@ -334,8 +334,7 @@ int main_test(void) {
 #include "replay_list.h"
         };
         int q;
-        for (q = 0; q < (int)(sizeof rl / sizeof rl[0]); q++) { out("=========================================================================
-"); replay_one(rl[q][0], rl[q][1]); }
+        for (q = 0; q < (int)(sizeof rl / sizeof rl[0]); q++) { out("=========================================================================\n"); replay_one(rl[q][0], rl[q][1]); }
         return 0;
     }
 #endif
@@ -343,7 +342,7 @@ int main_test(void) {
         const struct fuzz_fn* f = &g_fuzz_fns[fi];
         int cmp = 0, mism = 0, crashes = 0, div_traps = 0, stub_paths = 0, shown = 0, unspec = 0;
         int sk_fault = 0, sk_io = 0, sk_code = 0, sk_wild = 0, sk_sdk = 0;
-        unsigned crash_eip = 0, crash_addr = 0, crash_sig = 0;
+        unsigned crash_eip = 0, crash_addr = 0, crash_sig = 0; int crash_t = -1;
         total_fn++;
         if (!f->nat) { nonnative++; continue; }
         if (known_incompatible(f->name)) { known_skipped++; continue; }
@@ -396,7 +395,7 @@ int main_test(void) {
             cmp++;
             if ((status & 0x7f) != 0 || shared->marker != 0xd0d0d0d0u) {
                 crashes++;
-                if (!crash_eip) { crash_sig = shared->marker == 0xdeadfa17u ? shared->fault_sig : (unsigned)(status & 0x7f); crash_eip = shared->fault_eip; crash_addr = shared->fault_addr; }
+                if (!crash_eip) { crash_t = t; crash_sig = shared->marker == 0xdeadfa17u ? shared->fault_sig : (unsigned)(status & 0x7f); crash_eip = shared->fault_eip; crash_addr = shared->fault_addr; }
                 continue;
             }
             if (shared->stub_calls) stub_paths++;
@@ -426,7 +425,7 @@ int main_test(void) {
         if (mism || crashes || stub_paths) {
             bad_fn++;
             out(mism || crashes ? "DIVERGES " : "STUB-PATH "); outnum(fi); out(" "); out(f->name); out(": "); outnum(cmp); out(" compared, "); outnum(mism); out(" mismatches, "); outnum(crashes); out(" native crashes");
-            if (crashes) { out(" (signal "); outnum(crash_sig); out(" at eip "); outhex(crash_eip); out(" address "); outhex(crash_addr); out(")"); }
+            if (crashes) { out(" (first crash at trial "); outnum(crash_t); out(", signal "); outnum(crash_sig); out(" at eip "); outhex(crash_eip); out(" address "); outhex(crash_addr); out(")"); }
             if (stub_paths) { out(", "); outnum(stub_paths); out(" trials where the native code called an SDK stub"); }
             if (div_traps) { out(", "); outnum(div_traps); out(" divide traps"); }
             out("\n");

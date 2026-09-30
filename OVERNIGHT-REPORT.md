@@ -1,6 +1,20 @@
 # FFT decomp — working report
 
-Started 2026-09-29 (evening). Last updated 2026-09-30 ~01:00. Newest status at the top.
+Started 2026-09-29 (evening). Last updated 2026-09-30 (small hours). Newest status at the top.
+
+## Latest: the native game boots in lockstep with the original code
+
+`port\native\lockstep.ps1` compiles the game's C (`src/main` + `src/battle` + the SDK sources that are not hardware) with a modern compiler, boots
+it headless from `main()` on a shared high-level emulation of the SDK's hardware layer, and runs the **original machine code** next to it on the
+R3000 interpreter (same HLE, own RAM image). **RAM is compared word for word at every VSync: 445 frames identical, from `main()` through the logos,
+sound init and system-file loading to the first code-overlay load (OPEN.BIN), with zero calls into stubbed functions.** That is the first
+whole-program equivalence result for the native port. What the work shook out (all fixed): the interpreter's BIOS function numbers were off by one for
+`strlen/bcopy/bzero/memcpy/memset`, a missing native for a 12-byte callable no-op, a native thread-start bounds bug (found by the function fuzz), and the
+native soft-reset mechanism (`setjmp`/`longjmp`). The last two function-fuzz crashes are classified (a stale-argument site of the original game and the
+thread-start bug), so **all 25 flagged fuzz functions are now explained**. Design and numbers: `NATIVE-RUNTIME.md` sections 7-9.
+
+Next: overlay switching (per-overlay tables + trampolines) so the lockstep can go on through OPEN -> WORLD -> BATTLE, then scripted pad input and CD streaming.
+Still nothing pushed, published or downloaded.
 
 ## TL;DR
 

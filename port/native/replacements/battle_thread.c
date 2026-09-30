@@ -107,7 +107,7 @@ void battle_thread_start(s32 thread_id, void (*function)(void)) {
     thread->task_words[4] = 0;
     thread->task_words[5] = 0;
     thread->task_words[6] = 0;
-    if (thread_id != 0) {
+    if (thread_id > 0 && thread_id < NT_SLOTS) {               /* retail writes the record for any id; only real slots have a native context */
         g_nt_ctx[thread_id].started = 0;
     }
 }

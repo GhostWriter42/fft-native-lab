@@ -103,22 +103,30 @@ static int bios_call(r3k_t* c, unsigned int table) {
         return 0;
     }
     if (table != 0xa0) { set_fault(c, R3K_FAULT_BIOS, c->pc, fn, table); return 1; }
+    /* function numbers as in the game's own veneers (li t1,N): psx-spx numbering; port/native/bios_rt.c implements the same services natively */
     switch (fn) {
     case 0x44: break;                                                                        /* FlushCache */
-    case 0x0d: case 0x0e: c->r[2] = (int)a0 < 0 ? 0u - a0 : a0; break;                      /* abs, labs */
-    case 0x1a: for (i = 0; rd8(c, a0 + i); i++) ; c->r[2] = i; break;                         /* strlen */
-    case 0x26: for (i = 0; i < a2; i++) wr8(c, a1 + i, rd8(c, a0 + i)); break;                /* bcopy(src, dst, len) */
-    case 0x27: for (i = 0; i < a1; i++) wr8(c, a0 + i, 0); break;                             /* bzero(dst, len) */
-    case 0x29: for (i = 0; i < a2; i++) wr8(c, a0 + i, rd8(c, a1 + i)); c->r[2] = a0; break;  /* memcpy(dst, src, len) */
-    case 0x2a: for (i = 0; i < a2; i++) wr8(c, a0 + i, a1); c->r[2] = a0; break;              /* memset(dst, byte, len) */
-    case 0x2b:                                                                                /* memmove(dst, src, len) */
+    case 0x39: break;                                                                        /* InitHeap */
+    case 0x0e: case 0x0f: c->r[2] = (int)a0 < 0 ? 0u - a0 : a0; break;                      /* abs, labs */
+    case 0x15: { unsigned int e = a0; while (rd8(c, e)) e++; for (i = 0; ; i++) { unsigned int b = rd8(c, a1 + i); wr8(c, e + i, b); if (!b) break; } c->r[2] = a0; } break;   /* strcat(dst, src) */
+    case 0x17:                                                                                /* strcmp(a, b): difference of the first differing bytes */
+        for (i = 0; ; i++) { unsigned int x = rd8(c, a0 + i), y = rd8(c, a1 + i); if (x != y) { c->r[2] = x - y; break; } if (!x) { c->r[2] = 0; break; } }
+        break;
+    case 0x19: for (i = 0; ; i++) { unsigned int b = rd8(c, a1 + i); wr8(c, a0 + i, b); if (!b) break; } c->r[2] = a0; break;   /* strcpy(dst, src) */
+    case 0x1b: for (i = 0; rd8(c, a0 + i); i++) ; c->r[2] = i; break;                         /* strlen */
+    case 0x27: for (i = 0; i < a2; i++) wr8(c, a1 + i, rd8(c, a0 + i)); break;                /* bcopy(src, dst, len) */
+    case 0x28: for (i = 0; i < a1; i++) wr8(c, a0 + i, 0); c->r[2] = a0; break;               /* bzero(dst, len) */
+    case 0x2a: for (i = 0; i < a2; i++) wr8(c, a0 + i, rd8(c, a1 + i)); c->r[2] = a0; break;  /* memcpy(dst, src, len) */
+    case 0x2b: for (i = 0; i < a2; i++) wr8(c, a0 + i, a1); c->r[2] = a0; break;              /* memset(dst, byte, len) */
+    case 0x2c:                                                                                /* memmove(dst, src, len) */
         if (a0 <= a1) for (i = 0; i < a2; i++) wr8(c, a0 + i, rd8(c, a1 + i));
         else for (i = a2; i > 0; i--) wr8(c, a0 + i - 1, rd8(c, a1 + i - 1));
         c->r[2] = a0; break;
-    case 0x2c:                                                                                /* memcmp */
+    case 0x2d:                                                                                /* memcmp */
         c->r[2] = 0;
         for (i = 0; i < a2; i++) { unsigned int x = rd8(c, a0 + i), y = rd8(c, a1 + i); if (x != y) { c->r[2] = x < y ? 0xffffffffu : 1u; break; } }
         break;
+    case 0x2e: c->r[2] = 0; for (i = 0; i < a2; i++) if (rd8(c, a0 + i) == (a1 & 0xff)) { c->r[2] = a0 + i; break; } break;   /* memchr(s, c, n) */
     case 0x2f: c->rand_calls++; c->bios_rand_seed = c->bios_rand_seed * 1103515245u + 12345u; c->r[2] = (c->bios_rand_seed >> 16) & 0x7fffu; break;   /* rand */
     case 0x30: c->bios_rand_seed = a0; break;                                                 /* srand */
     default: set_fault(c, R3K_FAULT_BIOS, c->pc, fn, table); return 1;
@@ -145,6 +153,7 @@ static int step(r3k_t* c) {
         unsigned int w = phys >> 2;
         if (c->hle_bitmap[w >> 3] & (1u << (w & 7))) {
             c->hle_calls++;
+            if (c->ld_reg) { c->r[c->ld_reg] = c->ld_val; c->ld_reg = 0; }             /* a load in the jal's delay slot has landed by the time the (replaced) callee returns */
             if (c->hle(c, cur)) { set_fault(c, R3K_FAULT_BIOS, cur, 0, cur); return 1; }
             c->pc = c->r[31]; c->npc = c->pc + 4;
             return 0;

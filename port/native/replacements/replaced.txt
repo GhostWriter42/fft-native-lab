@@ -1,1 +1,3 @@
 src/battle/battle_thread_start.c
+src/main/main.c
+src/main/main_system_store_stack_pointer.c

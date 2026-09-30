@@ -13,13 +13,15 @@ int memcmp(const void* a, const void* b, unsigned int n) {
 #ifdef PC_SCHEME
 #define MEMMOVE native_memmove
 #define MEMSET native_memset
+#define WEAK __attribute__((weak))    /* a whole-program build links the game's own (or bios_rt.c's) definitions instead */
 #else
 #define MEMMOVE memmove
 #define MEMSET memset
+#define WEAK
 #endif
-void* MEMMOVE(void* d, const void* s, unsigned int n) {
+WEAK void* MEMMOVE(void* d, const void* s, unsigned int n) {
     unsigned char* dd = (unsigned char*)d; const unsigned char* ss = (const unsigned char*)s;
     if (dd < ss) while (n--) *dd++ = *ss++; else { dd += n; ss += n; while (n--) *--dd = *--ss; }
     return d;
 }
-void* MEMSET(void* d, int c, unsigned int n) { unsigned char* dd = (unsigned char*)d; while (n--) *dd++ = (unsigned char)c; return d; }
+WEAK void* MEMSET(void* d, int c, unsigned int n) { unsigned char* dd = (unsigned char*)d; while (n--) *dd++ = (unsigned char)c; return d; }

@@ -21,7 +21,7 @@ rename_defs() {   # rename defined yaml-function symbols of object $1 to native_
   return 0
 }
 # game-facing runtime pieces: these define yaml function names (RotTrans, rsin, battle_copy_bytes, ...), so they are renamed too
-for s in /port/native/gte/libgte_native.c $P/rsin.c $P/sin_1.c $P/rcos.c $P/ratan2.c $P/csqrt.c $P/psyq_gte_csqrt_kernel.c /port/native/replacements/battle_asm.c /port/native/replacements/battle_asm2.c /port/native/replacements/battle_thread.c; do
+for s in /port/native/gte/libgte_native.c $P/rsin.c $P/sin_1.c $P/rcos.c $P/ratan2.c $P/csqrt.c $P/psyq_gte_csqrt_kernel.c /port/native/replacements/main_asm.c /port/native/replacements/battle_asm.c /port/native/replacements/battle_asm2.c /port/native/replacements/battle_thread.c; do
   o="$W/x_$(basename "$s" .c).o"
   if [ -n "$DIVFIX" ]; then gcc $CF -S -o "$o.s" "$s" && awk -f /port/tools/divfix.awk "$o.s" > "$o.f.s" && gcc -m32 -c -x assembler "$o.f.s" -o "$o"; rm -f "$o.s" "$o.f.s"
   else gcc $CF -c "$s" -o "$o"; fi

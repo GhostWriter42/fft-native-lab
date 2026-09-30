@@ -78,7 +78,23 @@ randomly perturbed, on the original code (interpreter) and on the native build; 
 which the original touched hardware, called an SDK routine, read its own machine code as data, wrote into code, used an address a native build
 cannot reach, or ran too long are skipped.
 
-Progress of the run (30 trials per function): see the table at the end of this file. Method notes worth keeping:
+Result (30 trials per function, `-AutoInit -DivFix`, PS1-address scheme): **1,871 of 2,314 functions compared at least once (81%)**, 42,691 compared
+trials; 25 functions differ in some trial. Every one was replayed (call trace + RAM hash on both machines) and falls into one of these classes --
+none is a mistake in the portified game logic:
+
+| Class | Functions | Cause |
+|---|---|---|
+| Stale-register arguments (documented retail quirks) | `main_party_save_unit`, `battle_gfx_set_thrown_item_graphic_palette`, `..._by_battle_id`, `..._by_misc_id`, `battle_state_enter_effect_playback`, `battle_status_resolve_unit_changes_in_preview`, `battle_unit_start_post_attack_animation_display` (native crash: the callee dereferences the garbage) | the retail code calls a function without setting an argument and the callee reads the caller's leftover `$a0`/`$a1` (`get_item_data_pointer()` is `main_item_get_data_pointer(item_id)`; `battle_effect_init_data(result)` returns `$a0` for unhandled states). Natively the argument is whatever the stack holds. Needs a per-site patch (pass the value explicitly) |
+| Uninitialised init-struct bytes copied into game state | `battle_action_report_level_up`, `..._job_level_up`, `battle_unit_update_animation_for_status_changes`, `battle_script_teleportin_event_instruction`, `battle_script_process_pending_requests` | the caller's `battle_effect_secondary_init_t` is only partly filled and the callee copies all of it (unused caster/target block bytes, `target_count` garbage in one path); retail copies stale stack bytes |
+| Unspecified return value | `battle_move_has_reached_*` (3), `battle_unit_animate/advance_*teleport_distortion` (2), `battle_menu_alloc_window_buffer_pair`, `battle_script_set_units_movement_effect_suppression`, `battle_map_control_gte_background_color`, `battle_action_calculate_at_list_and_get_specific_unit_id`, `battle_ai_can_unit_be_targeted_cryst_trea_mount_trans` | the function can fall off its end / return an uninitialised local; RAM and calls are identical |
+| Thread machinery | `battle_menu_build_ability_preview_at_list`, `battle_menu_check_action_slot_restrictions` | `battle_thread_call_on_main_stack` saves `$sp`/`$ra` in RAM; the native call does not. The second one calls `battle_thread_start(-1, ...)`: retail writes the record before `g_battle_threads`, the native replacement also indexed its context array with -1 and crashed -- a real bug in the replacement, fixed (bounds check) |
+| Overlay switching | `main_overlay_call_battle_entrypoint` | jumps into an overlay entry point (not part of this build) |
+
+Two further findings: `-ftrivial-auto-var-init=zero` is **not** a guarantee at -O1 (GCC 12 still folds the uninitialised return of
+`battle_map_control_gte_background_color` into the one value that is assigned), so cross-compiler determinism needs a source-level zero-initialisation
+pass; and calling an *alias* symbol of a function (`get_item_data_pointer`) works only because the trampoline sits at the shared address.
+
+Method notes worth keeping:
 * the interpreter must start every trial clean (registers, stack region, code image, RAM from the pristine disc image), otherwise one
   trial's wild write changes the next trial's behaviour;
 * a divergence is localised by `-Replay 'index,trial'`: call trace + a hash of all data RAM at every call on both machines, the RAM words that
@@ -100,14 +116,45 @@ LBA 60513 / 3688 / 86000..86595), and reaches the OPEN overlay (opening movie / 
 streaming API used for the FMVs), which is the first thing the prototype does not implement.
 
 Why this matters: the same C HLE source can be compiled twice, once against the interpreter's RAM and once against the native RAM image, so the
-native game and the original code can be run frame by frame from the same boot and their RAM compared at every `VSync` � a whole-program
+native game and the original code can be run frame by frame from the same boot and their RAM compared at every `VSync` -- a whole-program
 differential test, and the natural first milestone of the native runtime ("boots headless to the opening overlay"). The native side already has the
 pieces it needs: the RAM image, trampolines, coroutine threads, the software GTE.
 
-## 9. Open items
+## 9. Whole-program lockstep (`port\native\lockstep.ps1`)
 
-* Overlay switching in the native runtime (per-overlay symbol tables, trampolines, data image reload), and the same fuzz for WORLD / WLDCORE /
-  OPEN / EVENT / EFFECT (each module needs its overlay image loaded next to SCUS).
-* HLE of the SDK hardware layer; a null renderer; boot to title screen with scripted input.
+The HLE of section 8 now lives in one shared source (`port\native\hle\hle.c`, generated glue `gen_hle.py`) that is compiled twice: against the
+interpreter's RAM and against the native RAM image. `lockstep.c` runs both machines from the entry of `main()`:
+
+1. the original code runs from `__SN_ENTRY_POINT` on the interpreter until it reaches `main()` (71,514 instructions: BSS clear, `__SN_ENTRY_POINT`);
+2. the interpreter's data RAM is copied into the native image (function bodies stay as x86 trampolines) and the native `main()` starts on a coroutine
+   stack; the GTE state is swapped per machine at every switch;
+3. per frame: native runs to its next `VSync(0)` (the HLE runs the registered vertical-blank callback, then switches back to the driver), the
+   interpreter runs to its next `VSync(0)`, then **every data word of RAM (88 ranges, 1.3 MB) and the scratchpad are compared**. The first mismatch
+   is printed with labelled addresses; a native crash prints a frame-pointer backtrace resolved through `nm`.
+
+What is linked natively: `src/main`, `src/battle`, and every SDK source that is not hardware-facing (libgpu setters, libc, parts of libapi ...).
+Dropped from the link: the objects that define SDK functions the HLE takes over (220 names; libspu/libetc/libcd/libcard and the event/pad/GPU
+entry points) and the 54 BIOS tail veneers (`li t2,0xa0; jr t2; li t1,N` -- natively they would "goto" address 0xa0). The BIOS services the game
+uses are provided by `bios_rt.c` with the same semantics as the interpreter's BIOS layer; anything else that has no native definition becomes a
+counting stub whose calls are reported (none in the boot).
+
+**Result: 445 frames (VSyncs) from `main()` to the first code-overlay load (OPEN/OPEN.BIN, LBA 86000), RAM identical at every one, zero stub calls.**
+The boot covers the SN crt state, the logos, sound-driver initialisation, system-file loading (11 CD reads with the game's own sector/callback
+handling), the game loop and the soft-reset machinery.
+
+Ignored words (documented, not bugs): the kernel area below 0x8000f800 (the SDK's exception-vector patches -- the interpreter fakes the kernel
+tables), `g_psyq_crt_constructors_ran` and the `g_psyq_*_saved_ra` words (saved by hand-written SDK code; `__main` is not called natively), the thread
+records' register save area, the two saved-`$ra` words of `battle_thread_call_on_main_stack`.
+
+Bugs this found (all fixed): the interpreter's BIOS function numbers for `strlen/bcopy/bzero/memcpy/memset/memcmp` were off by one against the game's own
+veneers (`bcopy` was executing as `bzero`), which had silently made the function fuzz skip every function that reached them; `main_noop_800449ec`
+(a `kind: blocked` stub) was missing from the native tables, so a call through its PS1 address executed MIPS code as x86; the native `main()` stored 0
+where retail stores its `$sp` for the soft reset and had no way to restart the game loop (now a builtin `setjmp`/`longjmp` in `replacements\main_asm.c`).
+
+## 10. Open items
+
+* Overlay switching in the native runtime (per-overlay stub tables, trampolines installed when the module's image lands, data ranges recomputed),
+  so that the lockstep can continue through OPEN -> WORLD -> BATTLE; the same fuzz for WORLD / WLDCORE / OPEN / EVENT / EFFECT.
+* HLE of the rest of the SDK: `CdRead2` streaming, scripted pad input, the memory card, GPU lists (`DrawOTag`) for a null renderer, then a real one.
 * The four GTE map-queue routines and the two blitters (or their replacement by the HD renderer).
 * A source-level division policy for non-x86 targets; the thread-context snapshot for rollback.

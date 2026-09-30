@@ -39,7 +39,8 @@ if ($Replay) {                                     # 'index,trial' or 'index,tri
 $keyFile = Join-Path $nb 'all_pc\build_key.txt'
 $divfixEnv = ""
 if ($DivFix) { $divfixEnv = "1" }
-$key = "flags=$gameFlags divfix=$divfixEnv dirs=$dirs"
+$repHash = (Get-FileHash (Join-Path $PSScriptRoot 'replacements\replaced.txt') -Algorithm MD5).Hash
+$key = "flags=$gameFlags divfix=$divfixEnv dirs=$dirs replaced=$repHash"
 $have = ''
 if (Test-Path $keyFile) { $have = (Get-Content $keyFile -Raw).Trim() }
 if ($Rebuild -or $have -ne $key) {

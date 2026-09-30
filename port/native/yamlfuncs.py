@@ -1,14 +1,14 @@
 """Shared parser for target/*.yaml: the decompiled functions (rows with size) plus the HANDWRITTEN routines.
 
-A handwritten routine is a `kind: handwritten` region ({addr, end, kind: handwritten, why}) whose start address also has a bare
-named row ({addr, name}); the decomp keeps such code as raw bytes (no C source), but native builds need them as functions:
-they are returned here with size = end - addr and asm=True."""
+A handwritten routine is a `kind: handwritten` (or `kind: blocked`: a callable stub the C cannot reproduce, e.g. main_noop_800449ec)
+region ({addr, end, kind: handwritten, why}) whose start address also has a bare named row ({addr, name}); the decomp keeps such code
+as raw bytes (no C source), but native builds need them as functions: they are returned here with size = end - addr and asm=True."""
 import re
 from pathlib import Path
 
 fn_row = re.compile(r'^\s*-\s*\{addr:\s*(0x[0-9a-fA-F]+),\s*size:\s*(\d+),\s*name:\s*([A-Za-z_]\w*)(.*)\}\s*$')
 bare_row = re.compile(r'^\s*-\s*\{addr:\s*(0x[0-9a-fA-F]+),\s*name:\s*([A-Za-z_]\w*)\}\s*$')
-hw_row = re.compile(r'^\s*-\s*\{addr:\s*(0x[0-9a-fA-F]+),\s*end:\s*(0x[0-9a-fA-F]+),\s*kind:\s*handwritten')
+hw_row = re.compile(r'^\s*-\s*\{addr:\s*(0x[0-9a-fA-F]+),\s*end:\s*(0x[0-9a-fA-F]+),\s*kind:\s*(?:handwritten|blocked)')
 
 
 def module_functions(path):
