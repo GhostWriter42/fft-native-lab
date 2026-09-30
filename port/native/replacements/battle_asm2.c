@@ -116,3 +116,94 @@ void battle_clear_menu_render_buffer(void* buffer, s32 bytes) {
         tail--;
     }
 }
+
+#define BLIT_LHU(p, off) ((u32)*(const u16*)((const u8*)(p) + (off)))
+/* 4bpp image -> 4bpp image, one 32-bit word (8 pixels) at a time through nibble masks; the retail routine's behaviour is reproduced on purpose, quirks included:
+ *  - the colour offset (the word at +12 of the destination record) only reaches the pixel when the source nibble is the lowest one of its word (the add happens before the
+ *    mask at the source position, so its bits vanish for every other nibble);
+ *  - a source word that is entirely zero lets the routine skip 8 pixels at once, whatever the two bit offsets are (only exact when both are 0).
+ * Registers of the original are kept as variables (t2 rows left, t3 pixels left, s2/s3 source word pointer and word, s4/s5 destination word pointer and word, t4/t5 nibble
+ * masks, t6/t7 bit offsets). Its scratchpad temporaries (0x1f800000..0x5b) are not reproduced: the lockstep ignores them. */
+static void blit_glyph_rows(const u8* src, u8* dst, const u8* srect, const u8* drect, int check_x256) {
+    u32 s7 = BLIT_LHU(srect, 0), t1 = BLIT_LHU(srect, 2), s2 = BLIT_LHU(srect, 8);
+    u32 t8 = BLIT_LHU(drect, 0), t9, s4, s8;
+    u32 src_stride_bits, dst_stride_bits, width, height, v0, src_bit, dst_bit, src_ptr, dst_ptr;
+    u32 t2, t3, t4, t5, t6, t7, s3, s5;
+    if (check_x256 && (s32)t8 >= 256) return;                                    /* blit_text_glyph only: nothing is drawn right of the 256-pixel screen */
+    t9 = BLIT_LHU(drect, 2); s4 = BLIT_LHU(drect, 8); s8 = *(const u32*)(drect + 12);
+    src_stride_bits = s2 << 2; s2 >>= 1;
+    width = BLIT_LHU(srect, 4); height = BLIT_LHU(srect, 6);
+    v0 = (s7 & 1) << 2; s7 >>= 1;
+    s2 = s2 * t1;
+    dst_stride_bits = s4 << 2; s4 >>= 1;
+    s2 = s2 + s7 + (u32)src;
+    src_bit = ((s2 & 3) << 3) + v0;
+    src_ptr = s2 & ~3u;
+    s4 = s4 * t9;
+    v0 = (t8 & 1) << 2; t8 >>= 1;
+    s4 = s4 + t8 + (u32)dst;
+    dst_bit = ((s4 & 3) << 3) + v0;
+    dst_ptr = s4 & ~3u;
+    t2 = height;
+    do {
+        s2 = src_ptr; t6 = src_bit; t4 = 15u << t6; s3 = *(const u32*)s2;
+        s4 = dst_ptr; t7 = dst_bit; t5 = 15u << t7; s5 = *(u32*)s4;
+        t3 = width;
+        for (;;) {
+            if (s3 == 0 && (s32)t3 >= 8) {
+                if (t3 == 8) break;                                              /* exactly one word of zeros left: the row is done */
+                *(u32*)s4 = s5; s2 += 4; s4 += 4; s5 = *(u32*)s4; s3 = *(const u32*)s2; t3 -= 7;
+            } else {
+                v0 = s3 & t4;
+                if (v0) {
+                    v0 = (v0 + s8) & t4;
+                    s5 &= ~t5;
+                    if ((s32)t6 < (s32)t7) v0 <<= (t7 - t6); else v0 >>= (t6 - t7);
+                    s5 |= v0;
+                }
+                t6 += 4; t4 <<= 4;
+                if (t4 == 0) { s2 += 4; t4 = 15; t6 = 0; s3 = *(const u32*)s2; }
+                t7 += 4; t5 <<= 4;
+                if (t5 == 0) { *(u32*)s4 = s5; s4 += 4; t5 = 15; t7 = 0; s5 = *(u32*)s4; }
+            }
+            t3--;
+            if (t3 == 0) break;
+        }
+        *(u32*)s4 = s5;
+        v0 = dst_stride_bits + dst_bit; dst_ptr += (v0 >> 5) << 2; dst_bit = v0 & 0x1f;
+        v0 = src_stride_bits + src_bit; src_ptr += (v0 >> 5) << 2; src_bit = v0 & 0x1f;
+        t2--;
+    } while (t2 != 0);
+}
+
+extern s32 g_battle_text_substitution_value_27;                /* 0x80165f90: first glyph row to draw */
+extern s32 g_battle_text_substitution_value_28;                /* 0x80165f94: glyph row limit */
+
+/* BATTLE 0x8014bae4: the twin of world_text_blit_glyph, which also draws nothing when the destination x is 256 or more. */
+void blit_text_glyph(void* text, void* pixels, void* glyph, void* position) {
+    blit_glyph_rows((const u8*)text, (u8*)pixels, (const u8*)glyph, (const u8*)position, 1);
+}
+
+/* BATTLE 0x8014bd88: the twin of world_text_blit_font_glyph_to_4bpp. Rows from the limit on are skipped without consuming glyph bits; rows before the first row consume their
+ * bits but draw nothing. */
+void battle_text_render_glyph_to_4bpp_image(const u8* glyph_bitmap, s32 image, u16* origin, s32 palette_offset) {
+    s32 first_row = g_battle_text_substitution_value_27, limit = g_battle_text_substitution_value_28, r, c;
+    u32 ox = origin[0], oy = origin[1], stride = (u32)origin[4] >> 1;
+    u8* row = (u8*)image + stride * oy;
+    u32 bits = *glyph_bitmap, left = 4;
+    for (r = 0; r != 14; r++, row += stride) {
+        if (!(r < limit)) continue;
+        for (c = 0; c != 10; c++) {
+            u32 code = (bits & 0xc0) >> 6;
+            if (code && !(r < first_row)) {
+                u32 value = code + (u32)palette_offset, px = (u32)c + ox;
+                u8* p = row + (px >> 1);
+                u32 b = *p;
+                if (!(px & 1)) b &= 0xf0; else { b &= 0x0f; value <<= 4; }
+                *p = (u8)(b | value);
+            }
+            bits <<= 2;
+            if (--left == 0) { left = 4; glyph_bitmap++; bits = *glyph_bitmap; }
+        }
+    }
+}

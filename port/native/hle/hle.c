@@ -1,5 +1,6 @@
 /* HLE of the PlayStation SDK hardware layer -- see hle.h. */
 #include "hle.h"
+#include "gpu.h"
 
 static int streq(const char* a, const char* b) { while (*a && *a == *b) { a++; b++; } return *a == *b; }
 static unsigned bcd(unsigned v) { return (v >> 4) * 10 + (v & 15); }
@@ -138,6 +139,7 @@ unsigned hle_call(hle_t* h, const char* n, unsigned nargs, unsigned a0, unsigned
     if (nargs < 2) a1 = 0;
     if (nargs < 1) a0 = 0;
     if (!(h->p.interp_reexec && h->vsync_left)) { h->calls++; trace_call(h, n, a0, a1, a2, a3); }      /* a re-executed VSync is one call */
+    if (h->gpu) { unsigned r; if (gpu_hle_call(h, n, a0, a1, a2, a3, &r)) return r; }          /* the software GPU, when one is attached */
     if (streq(n, "VSync")) {
         /* VSync(0): wait for the next vertical blank; VSync(n >= 2): wait until n blanks have passed since the previous call (the machine does no work
          * in zero time, so: n blanks); VSync(1) / VSync(-1): report, do not wait. Each blank runs the game's own vertical-blank callback. */
@@ -263,6 +265,13 @@ unsigned hle_call(hle_t* h, const char* n, unsigned nargs, unsigned a0, unsigned
     }
     if (streq(n, "PadRead")) return h->pad_mask;                                 /* the scripted controller state (PSX_PAD_*: START 0x800, CROSS 0x40, CIRCLE 0x20, ...) */
     if (streq(n, "DrawSync")) return 0;
+    if (streq(n, "StoreImage")) {                                               /* VRAM -> RAM. The VRAM is not modelled, but the buffer must not keep its old bytes: the game copies parts of it around (the  */
+        static const unsigned char zeros[256];                                  /* BATTLE scroll list derives CLUT rows from one, over the code of whatever overlay is resident -- natively full of trampolines). */
+        unsigned w = h->p.r8(h->p.ctx, a0 + 4) | (h->p.r8(h->p.ctx, a0 + 5) << 8), rows = h->p.r8(h->p.ctx, a0 + 6) | (h->p.r8(h->p.ctx, a0 + 7) << 8), bytes = w * rows * 2u, off;
+        if (bytes > 0x100000u) bytes = 0x100000u;
+        for (off = 0; off < bytes; off += 256) h->p.write_bytes(h->p.ctx, a1 + off, zeros, bytes - off < 256 ? bytes - off : 256);
+        return 0;
+    }
     log_call(h, n, a0, a1, a2);
     return 0;
 }

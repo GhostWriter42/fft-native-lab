@@ -31,7 +31,8 @@ typedef struct r3k {
     unsigned int cur_pc;                /* address of the instruction being executed */
     unsigned int div_zero, div_overflow;/* divisions by zero / INT_MIN / -1 seen (defined on MIPS, traps on x86) */
     unsigned int watch_lo, watch_hi;    /* writes to [watch_lo, watch_hi) are logged (debugging aid; empty by default) */
-    unsigned int wlog_n, wlog_pc[16], wlog_addr[16], wlog_val[16];
+    unsigned int wlog_n, wlog_pc[256], wlog_addr[256], wlog_val[256], wlog_seq[256];
+    const unsigned int* wlog_seq_src;   /* optional: *wlog_seq_src is stored with every logged write (the lockstep passes its call counter) */
     unsigned int trace_calls, call_n, call_trace[1024];   /* targets of jal/jalr/j while trace_calls is set (debugging aid) */
     void (*call_hook)(struct r3k* c, unsigned int target);  /* optional: called when a traced jump target is REACHED (after its delay slot ran) */
     void (*event_hook)(struct r3k* c, unsigned int target); /* optional: the same for EVERY traced jump target (call_hook stops at the first 1024) */

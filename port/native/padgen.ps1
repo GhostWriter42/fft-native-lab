@@ -68,7 +68,7 @@ function New-PokeLines([string]$PokeWhen) {
     return $lines
 }
 
-function New-RunConfig([int]$Frames, [string]$Pad = '', [int]$PadSeed = 0, [int]$PadFrom = 1180, [switch]$TitleToBattle, [string]$PokeWhen = '') {
+function New-RunConfig([int]$Frames, [string]$Pad = '', [int]$PadSeed = 0, [int]$PadFrom = 1180, [switch]$TitleToBattle, [string]$PokeWhen = '', [string]$NatWatch = '', [switch]$Gpu, [string]$Shot = '', [int]$ShotEvery = 0, [int]$ShotFrom = 1, [int]$ShotScale = 1) {
     $all = [System.Collections.Generic.List[object]]::new()
     $n = 0
     if ($Pad) {
@@ -77,6 +77,11 @@ function New-RunConfig([int]$Frames, [string]$Pad = '', [int]$PadSeed = 0, [int]
     if ($TitleToBattle) { foreach ($e in (New-TitleToBattlePad)) { $all.Add([pscustomobject]@{ F = [int]$e[0]; N = $n++; B = $e[1] }) } }
     if ($PadSeed -gt 0) { foreach ($e in (New-RandomPad $PadSeed $PadFrom $Frames)) { $all.Add([pscustomobject]@{ F = [int]$e[0]; N = $n++; B = $e[1] }) } }
     $lines = @("frames $Frames") + (New-PokeLines $PokeWhen)
+    if ($Gpu -or $Shot -or $ShotEvery) { $lines += 'gpu 1' }                                    # software GPU: VRAM compared at every frame; screenshots (PNG) of the listed frames to port\build\shots
+    foreach ($f in ($Shot -split ',' | Where-Object { $_ })) { $lines += "shot $([int]$f)" }
+    if ($ShotEvery) { $lines += "shotevery $ShotEvery $ShotFrom" }
+    if ($ShotScale -gt 1) { $lines += "shotscale $ShotScale" }
+    if ($NatWatch) { $nw = $NatWatch -split ':'; $from = if ($nw.Count -gt 1) { [int]$nw[1] } else { 1 }; $lines += ('natwatch {0} {1}' -f (Get-SymAddr $nw[0]), $from) }      # every store of the native game to that word is reported (slow)
     # the program scans the entries in order: ascending frames (ties keep the order they were given in)
     foreach ($e in ($all | Sort-Object F, N)) { $lines += "pad $($e.F) $($e.B)" }
     return ($lines -join "`n") + "`n"

@@ -17,7 +17,7 @@ if (-not $NoBuild) {
     $buildOut.Split("`n") | Select-Object -Last 6 | Out-Host
     if ($buildOut -notmatch 'linked /ob/ls_pc/prog') { throw 'build failed' }
 }
-$vol = 'fft-ls-objs'
+$vol = if ($env:FFT_LS_VOL) { $env:FFT_LS_VOL } else { 'fft-ls-objs' }
 $seeds = $From..($From + $Count - 1)
 $sw = [Diagnostics.Stopwatch]::StartNew()
 $results = $seeds | ForEach-Object -ThrottleLimit $Parallel -Parallel {

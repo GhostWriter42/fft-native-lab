@@ -48,7 +48,7 @@ static unsigned int rd32(r3k_t* c, unsigned int a) {
     return *(unsigned int*)p;
 }
 static void wlog(r3k_t* c, unsigned int a, unsigned int v) {
-    if (a >= c->watch_lo && a < c->watch_hi && c->wlog_n < 16) { c->wlog_pc[c->wlog_n] = c->cur_pc; c->wlog_addr[c->wlog_n] = a; c->wlog_val[c->wlog_n] = v; c->wlog_n++; }
+    if (a >= c->watch_lo && a < c->watch_hi && c->wlog_n < 256) { c->wlog_pc[c->wlog_n] = c->cur_pc; c->wlog_addr[c->wlog_n] = a; c->wlog_val[c->wlog_n] = v; c->wlog_seq[c->wlog_n] = c->wlog_seq_src ? *c->wlog_seq_src : 0; c->wlog_n++; }
 }
 static void wr8(r3k_t* c, unsigned int a, unsigned int v) {
     unsigned char* p = mp(c, a);
@@ -92,7 +92,7 @@ void r3k_reset(r3k_t* c, unsigned char* ram) {
     c->sp_top = 0x801fff00u;
     c->steps = 0; c->io_reads = c->io_writes = c->io_last_addr = 0; c->syscalls = c->bios_calls = c->rand_calls = 0;
     c->fault = 0; c->fault_pc = c->fault_instr = c->fault_addr = 0;
-    c->ncode = c->code_reads = c->code_writes = c->wild = c->nsdk = c->sdk_hits = 0; c->hle = 0; c->hle_calls = 0; c->tick = 0; { unsigned int q; for (q = 0; q < sizeof c->hle_bitmap; q++) { c->hle_bitmap[q] = 0; c->tick_bitmap[q] = 0; } } c->trace_calls = c->call_n = 0; c->call_hook = 0; c->event_hook = 0; c->pending_call = 0; c->cur_pc = 0; c->div_zero = c->div_overflow = 0; c->watch_lo = c->watch_hi = 0; c->wlog_n = 0;
+    c->ncode = c->code_reads = c->code_writes = c->wild = c->nsdk = c->sdk_hits = 0; c->hle = 0; c->hle_calls = 0; c->tick = 0; { unsigned int q; for (q = 0; q < sizeof c->hle_bitmap; q++) { c->hle_bitmap[q] = 0; c->tick_bitmap[q] = 0; } } c->trace_calls = c->call_n = 0; c->call_hook = 0; c->event_hook = 0; c->pending_call = 0; c->cur_pc = 0; c->div_zero = c->div_overflow = 0; c->watch_lo = c->watch_hi = 0; c->wlog_n = 0; c->wlog_seq_src = 0;
 }
 
 /* BIOS A-table entries that the game's C code reaches through the libc stubs (e.g. rand at 0x8002230c: li t2,0xa0; jr t2; li t1,0x2f). */

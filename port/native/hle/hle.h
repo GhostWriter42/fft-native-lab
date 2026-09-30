@@ -59,6 +59,7 @@ typedef struct hle {
     /* what the frame's first DrawOTag calls drew, for diagnosing a mismatch of their hashes: per call the packets as {address, length, words...} */
     struct hle_otdump { unsigned trace_idx, n; unsigned w[HLE_OTDUMP_WORDS]; } otdump[HLE_OTDUMPS];
     unsigned otdump_n;
+    struct gpu* gpu;                                                            /* optional software GPU (gpu.h): when set, the drawing calls render into its VRAM */
 } hle_t;
 enum { HLE_SYNC_NONE = 0, HLE_SYNC_VSYNC = 1, HLE_SYNC_OVERLAY = 2, HLE_SYNC_DIVERGED = 3 };
 
@@ -82,7 +83,6 @@ unsigned hle_call(hle_t* h, const char* name, unsigned nargs, unsigned a0, unsig
  * compared without transliterating them first; their native versions are a separate verification job (harness_diff_asm.c). */
 #define HLE_SKIP_NAMES(X) \
     X(battle_map_queue_textured_triangles) X(battle_map_queue_textured_quads) X(battle_map_queue_untextured_triangles) X(battle_map_queue_untextured_quads) \
-    X(blit_text_glyph) X(battle_text_render_glyph_to_4bpp_image) X(world_text_blit_glyph) X(world_text_blit_font_glyph_to_4bpp) \
     X(open_movie_start_stream)
 
 /* Functions whose ENTRY lets virtual time pass (they poll a variable that the vertical-blank interrupt updates, in a loop with no SDK call): they are

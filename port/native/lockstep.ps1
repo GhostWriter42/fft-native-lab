@@ -7,6 +7,8 @@
 # -PadSeed N [-PadFrom 1180] random play from that frame on (a different game for every seed; combine with -TitleToBattle)
 # -PokeWhen 'cond_symbol=value:symbol=value,...'   cheats: once, when the word at the first symbol equals the value, store the second value at the second symbol (both machines), e.g.
 #             'g_battle_game_state=0x27:g_battle_game_state=0x3b' closes the battle at the first change of turn (-> the world map)
+# -Gpu  attach the software GPU (hle\gpu.c) to both machines: VRAM is compared at every frame; -Shot 'f1,f2' / -ShotEvery N [-ShotFrom F] write the native display as PNG to port\build\shots (-ShotScale 1..3)
+# -NatWatch 'sym+off[:FROM_FRAME]'   report every store of the NATIVE game to that word (page protection + single step: slow), with the storing instruction resolved to a function
 # -Replay N   at frame N run the ORIGINAL first, record its function-call sequence, then run the native game under live comparison: the first different call (or a hang) is reported
 # -Dump N     with -Replay: also print the first N calls of the replayed frame (function, first two arguments)
 # -Where N    at the VSync of frame N print where the original is (function, registers, the return addresses found on its stack)
@@ -17,7 +19,7 @@
 #                               are also compared at every function entry (the first entry where the native game's value differs is reported)
 # -BuildOnly  compile and link the program (kept in the docker volume) without running it;  -RunOnly  run the program linked by an earlier build (no generators, no
 #             compilation: soak.ps1 uses this once per random input script). Build flags (-Scenario, -Replay, -Cflags, -Watch ...) are baked into the program.
-param([int]$Frames = 60, [int]$Log = 0, [switch]$Rebuild, [switch]$NoDivFix, [string]$Scenario = '', [string]$Pad = '', [string]$Watch = '', [string]$Peek = '', [int]$Replay = 0, [int]$Dump = 0, [string]$DumpAround = '', [string]$Cflags = '', [int]$PadSeed = 0, [int]$PadFrom = 1180, [switch]$TitleToBattle, [switch]$RunOnly, [switch]$BuildOnly, [int]$Where = 0, [string]$PokeWhen = '')
+param([int]$Frames = 60, [int]$Log = 0, [switch]$Rebuild, [switch]$NoDivFix, [string]$Scenario = '', [string]$Pad = '', [string]$Watch = '', [string]$Peek = '', [int]$Replay = 0, [int]$Dump = 0, [string]$DumpAround = '', [string]$Cflags = '', [int]$PadSeed = 0, [int]$PadFrom = 1180, [switch]$TitleToBattle, [switch]$RunOnly, [switch]$BuildOnly, [int]$Where = 0, [string]$PokeWhen = '', [string]$NatWatch = '', [switch]$Gpu, [string]$Shot = '', [int]$ShotEvery = 0, [int]$ShotFrom = 1, [int]$ShotScale = 1)
 . (Join-Path $PSScriptRoot 'padgen.ps1')
 $root = Split-Path $PSScriptRoot -Parent
 $repo = Join-Path (Split-Path $root -Parent) 'fft_decomp'
@@ -25,11 +27,13 @@ $nb   = Join-Path $root 'build\native\ls'      # own generated tables: the funct
 $bin  = Join-Path (Split-Path $root -Parent) 'game\Final Fantasy Tactics.bin'
 New-Item -ItemType Directory -Force $nb | Out-Null
 # the compiled objects live in a docker volume (native filesystem: thousands of small files are ~10x faster than on the Windows bind mount)
-$vol = 'fft-ls-objs'
+$vol = if ($env:FFT_LS_VOL) { $env:FFT_LS_VOL } else { 'fft-ls-objs' }          # FFT_LS_VOL: another docker volume, for a build that must not disturb a running soak
 # the run configuration (frames, controller script) is read by the program at start-up
 $cfg = Join-Path $nb 'run.cfg'
-[System.IO.File]::WriteAllText($cfg, (New-RunConfig -Frames $Frames -Pad $Pad -PadSeed $PadSeed -PadFrom $PadFrom -TitleToBattle:$TitleToBattle -PokeWhen $PokeWhen))
-$runVolumes = @('--volume', "${root}:/port", '--volume', "${vol}:/ob", '--volume', "$($repo)\build\extracted\files:/disc:ro", '--volume', "${bin}:/disc.bin:ro", '--volume', "${cfg}:/run.cfg:ro")
+[System.IO.File]::WriteAllText($cfg, (New-RunConfig -Frames $Frames -Pad $Pad -PadSeed $PadSeed -PadFrom $PadFrom -TitleToBattle:$TitleToBattle -PokeWhen $PokeWhen -NatWatch $NatWatch -Gpu:$Gpu -Shot $Shot -ShotEvery $ShotEvery -ShotFrom $ShotFrom -ShotScale $ShotScale))
+$shots = Join-Path $root 'build\shots'
+New-Item -ItemType Directory -Force $shots | Out-Null
+$runVolumes = @('--volume', "${shots}:/shots", '--volume', "${root}:/port", '--volume', "${vol}:/ob", '--volume', "$($repo)\build\extracted\files:/disc:ro", '--volume', "${bin}:/disc.bin:ro", '--volume', "${cfg}:/run.cfg:ro")
 if ($RunOnly) {
     docker run --rm --pull=never --cap-add SYS_RAWIO -e "RUN_ONLY=1" @runVolumes fft-decomp-dev:local sh /port/native/build_run_lockstep.sh
     exit $LASTEXITCODE
@@ -42,7 +46,7 @@ python (Join-Path $PSScriptRoot 'gen_fuzz.py') $repo $nb --native-prefix=native_
 python (Join-Path $PSScriptRoot 'gen_hle.py') $repo (Join-Path $nb 'hle_generated.c') @mods | Out-Host
 $dirs = 'src/main src/battle src/open src/wldcore src/world src/event src/effect src/psyq/libgpu src/psyq/libc src/psyq/libapi src/psyq/libetc src/psyq/libcd src/psyq/libspu src/psyq/libcard src/psyq/libpress src/psyq/suzuki'
 # -finstrument-functions: the replay mode compares the native game's function entries with the original's (the runtime's own files are excluded)
-$gameFlags = '-ftrivial-auto-var-init=zero -fno-omit-frame-pointer -finstrument-functions -finstrument-functions-exclude-file-list=native/rt.c,native/hle/hle.c,native/r3000/r3000.c,native/gte/gte.c,native/lockstep.c,native/bios_rt.c,sym_table.c,modules.c'
+$gameFlags = '-ftrivial-auto-var-init=zero -fno-omit-frame-pointer -finstrument-functions -finstrument-functions-exclude-file-list=native/rt.c,native/hle/hle.c,native/hle/gpu.c,native/r3000/r3000.c,native/gte/gte.c,native/lockstep.c,native/bios_rt.c,sym_table.c,modules.c'
 $divfixEnv = ''
 if (-not $NoDivFix) { $divfixEnv = '1' }
 $repHash = (Get-FileHash (Join-Path $PSScriptRoot 'replacements\replaced.txt') -Algorithm MD5).Hash

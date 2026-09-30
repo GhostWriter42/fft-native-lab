@@ -274,4 +274,19 @@ PATCHES = [
             '0x8416e4fe). Disassembly (0x800edfb0: addiu a0,sp,188; sw s2,188(sp)): `toggle` is the s16 at sp+192 and the next live word is sp+196, so sp+195 is padding '
             'and the retail write is harmless; dropping the call is exactly equivalent.',
     ),
+    dict(
+        file='src/battle/battle_ai_choose_wait_facing.c',
+        old='    u8 viable_directions[4];\n} battle_ai_wait_facing_work_t;',
+        new='    u8 viable_directions[4];\n    u8 past_the_end; /* index 4: read by the retail code when source and target coincide (battle_ai_find_direction_of_target returns 4); unused stack padding there */\n} battle_ai_wait_facing_work_t;',
+        why='battle_ai_choose_wait_facing indexes viable_directions with the direction of the target, which is 4 when the acting unit stands on the target tile: one byte past the '
+            'array. Retail reads the unused stack padding at sp+28 (disassembly 0x8019acf8: addiu v1,sp,24; addu v0,v1,s0; lbu); a native frame puts a live local there, which made the '
+            'native AI return direction 4 ("keep facing") where the original searched on (lockstep long soak: g_battle_unit_misc_data command_state.cursor.facing_hint 4 vs 0/1/2, seeds '
+            '203, 215, 220, 224, 229, 237). The byte is made an explicit zero (the zero-initialised padding of the oracle).',
+    ),
+    dict(
+        file='src/battle/battle_ai_choose_wait_facing.c',
+        old='    do {\n        work.target_coords.bytes.x = ai->acting_unit_coords.bytes.x + g_battle_ai_facing_tile_offsets.bytes[offset];',
+        new='    work.past_the_end = 0;\n    do {\n        work.target_coords.bytes.x = ai->acting_unit_coords.bytes.x + g_battle_ai_facing_tile_offsets.bytes[offset];',
+        why='see the first entry: the past-the-end byte of the viability array is zero.',
+    ),
 ]

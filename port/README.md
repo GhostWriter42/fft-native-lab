@@ -21,7 +21,8 @@ and host Python 3 (Pillow for the image tools).
 | `.\port\native\boundary.ps1` | compile all `src/main` + `src/battle` natively (parallel) and list the 201 unresolved externals (the platform layer still to write) |
 | `.\port\native\fuzz.ps1 [-Trials N] [-AutoInit] [-DivFix] [-Sdk] [-Replay 'index,trial;…']` | generic function-level differential fuzz: every simple-signature function of `src/main` + `src/battle` (2,314), native vs the original machine code; `-Replay` localises a divergence (call trace + RAM hashes on both machines) |
 | `.\port\native\boot.ps1 [-Frames N] [-Log N]` | boot probe: the ORIGINAL game from `__SN_ENTRY_POINT` on the interpreter with the SDK hardware layer HLE'd; logs the SDK calls and CD reads |
-| `.\port\native\lockstep.ps1 [-Frames N] [-Log N] [-Rebuild]` | **whole-program lockstep**: the native game and the original code boot side by side from `main()` on the same HLE, RAM compared at every VSync (445 frames identical up to the first overlay load) |
+| `.\port\native\lockstep.ps1 [-Frames N] [-Scenario title] [-TitleToBattle] [-PadSeed N] [-PokeWhen ...] [-Replay N] [-Watch ...] [-Gpu -Shot ...]` | **whole-program lockstep**: the native game and the original code boot side by side from `main()` on the same HLE, RAM compared at every VSync. Runs through the title menu, new game, the first battle (BATTLE + EVENT overlays) and the world map (WLDCORE + WORLD). Flags: `-TitleToBattle` (fixed START/CIRCLE presses into the first battle), `-PadSeed N -PadFrom F` (random play), `-PokeWhen 'sym=val:sym=val,...'` (cheats that steer into states input rarely reaches, e.g. the world map), `-Replay N` (function-level comparison of frame N: first different call / argument), `-Watch` (variables per frame; with `-Replay` compared at every function entry, plus the original's writers of the first one), `-Dump/-DumpAround` (calls with callers), `-NatWatch` (every store of the native game to a word: page protection + single step), `-Where N`, `-RunOnly/-BuildOnly`, `-Gpu -Shot 'f1,f2' -ShotEvery N -ShotScale k` (software GPU: VRAM compared at every frame, PNG screenshots to `build\shots`) |
+| `.\port\native\soak.ps1 [-From 1] [-Count 40] [-Frames 12000] [-Parallel 12] [-PadFrom 1180] [-PokeWhen ...] [-NoBuild]` | **random-play soak**: one docker run per random controller seed (`padgen.ps1`), all in parallel, each a whole-program lockstep; summary, function-coverage union and NULL-page accesses in `build\soak\` |
 | `.\port\native\gte\tests\run.ps1` | unit tests of the software GTE (4.58 M checks) |
 
 ## Tools (`tools\`)
@@ -47,5 +48,5 @@ the saved outputs (`OUTPUT-*.txt`). `NATIVE-RUNTIME.md` (project root) describes
 ## Next milestones (see ROADMAP.md)
 
 1. ~~Software GTE + libgte API~~ (done, verified against the original code); the SDK/BIOS shim for the remaining 201 externals (`boundary.ps1`).
-2. One native module per overlay with its own symbol map; boot -> title -> world -> battle with a null renderer.
-3. A renderer, audio, then HD assets and netcode.
+2. ~~One native module per overlay with its own symbol map; boot -> title -> world -> battle with a null renderer.~~ (done: 126 overlay modules; lockstep through title, new game, battle, events and the world map)
+3. A renderer (`native\hle\gpu.c`: a software GPU model with VRAM; first PNG frames), audio, then HD assets and netcode.

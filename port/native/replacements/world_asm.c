@@ -177,3 +177,95 @@ void world_gs_sortpoly(POLY_FT4* poly, s32 arg, s32 type, u32 value) {
     }
     g_world_gs_out_packet_p = (void*)world_ps_sort_sprite_bg((u32*)start, (GsOT*)arg, type & 0xffff, (s32)words);
 }
+
+#define BLIT_LHU(p, off) ((u32)*(const u16*)((const u8*)(p) + (off)))
+/* 4bpp image -> 4bpp image, one 32-bit word (8 pixels) at a time through nibble masks; the retail routine's behaviour is reproduced on purpose, quirks included:
+ *  - the colour offset (the word at +12 of the destination record) only reaches the pixel when the source nibble is the lowest one of its word (the add happens before the
+ *    mask at the source position, so its bits vanish for every other nibble);
+ *  - a source word that is entirely zero lets the routine skip 8 pixels at once, whatever the two bit offsets are (only exact when both are 0).
+ * Registers of the original are kept as variables (t2 rows left, t3 pixels left, s2/s3 source word pointer and word, s4/s5 destination word pointer and word, t4/t5 nibble
+ * masks, t6/t7 bit offsets). Its scratchpad temporaries (0x1f800000..0x5b) are not reproduced: the lockstep ignores them. */
+static void blit_glyph_rows(const u8* src, u8* dst, const u8* srect, const u8* drect, int check_x256) {
+    u32 s7 = BLIT_LHU(srect, 0), t1 = BLIT_LHU(srect, 2), s2 = BLIT_LHU(srect, 8);
+    u32 t8 = BLIT_LHU(drect, 0), t9, s4, s8;
+    u32 src_stride_bits, dst_stride_bits, width, height, v0, src_bit, dst_bit, src_ptr, dst_ptr;
+    u32 t2, t3, t4, t5, t6, t7, s3, s5;
+    if (check_x256 && (s32)t8 >= 256) return;                                    /* blit_text_glyph only: nothing is drawn right of the 256-pixel screen */
+    t9 = BLIT_LHU(drect, 2); s4 = BLIT_LHU(drect, 8); s8 = *(const u32*)(drect + 12);
+    src_stride_bits = s2 << 2; s2 >>= 1;
+    width = BLIT_LHU(srect, 4); height = BLIT_LHU(srect, 6);
+    v0 = (s7 & 1) << 2; s7 >>= 1;
+    s2 = s2 * t1;
+    dst_stride_bits = s4 << 2; s4 >>= 1;
+    s2 = s2 + s7 + (u32)src;
+    src_bit = ((s2 & 3) << 3) + v0;
+    src_ptr = s2 & ~3u;
+    s4 = s4 * t9;
+    v0 = (t8 & 1) << 2; t8 >>= 1;
+    s4 = s4 + t8 + (u32)dst;
+    dst_bit = ((s4 & 3) << 3) + v0;
+    dst_ptr = s4 & ~3u;
+    t2 = height;
+    do {
+        s2 = src_ptr; t6 = src_bit; t4 = 15u << t6; s3 = *(const u32*)s2;
+        s4 = dst_ptr; t7 = dst_bit; t5 = 15u << t7; s5 = *(u32*)s4;
+        t3 = width;
+        for (;;) {
+            if (s3 == 0 && (s32)t3 >= 8) {
+                if (t3 == 8) break;                                              /* exactly one word of zeros left: the row is done */
+                *(u32*)s4 = s5; s2 += 4; s4 += 4; s5 = *(u32*)s4; s3 = *(const u32*)s2; t3 -= 7;
+            } else {
+                v0 = s3 & t4;
+                if (v0) {
+                    v0 = (v0 + s8) & t4;
+                    s5 &= ~t5;
+                    if ((s32)t6 < (s32)t7) v0 <<= (t7 - t6); else v0 >>= (t6 - t7);
+                    s5 |= v0;
+                }
+                t6 += 4; t4 <<= 4;
+                if (t4 == 0) { s2 += 4; t4 = 15; t6 = 0; s3 = *(const u32*)s2; }
+                t7 += 4; t5 <<= 4;
+                if (t5 == 0) { *(u32*)s4 = s5; s4 += 4; t5 = 15; t7 = 0; s5 = *(u32*)s4; }
+            }
+            t3--;
+            if (t3 == 0) break;
+        }
+        *(u32*)s4 = s5;
+        v0 = dst_stride_bits + dst_bit; dst_ptr += (v0 >> 5) << 2; dst_bit = v0 & 0x1f;
+        v0 = src_stride_bits + src_bit; src_ptr += (v0 >> 5) << 2; src_bit = v0 & 0x1f;
+        t2--;
+    } while (t2 != 0);
+}
+
+extern s32 g_world_text_glyph_first_row;
+extern s32 g_world_text_glyph_row_limit;
+
+/* WORLD 0x800feff0: blit a 4bpp rectangle of one image into another (see blit_glyph_rows). The yaml's names for the parameters are placeholders. */
+void world_text_blit_glyph(void* otag, void* text_id, world_glyph_blit_t* resource, world_glyph_blit_t* pos) {
+    blit_glyph_rows((const u8*)otag, (u8*)text_id, (const u8*)resource, (const u8*)pos, 0);
+}
+
+/* WORLD 0x800ff284: draw one 10x14 font glyph (two bits per pixel: 0 = transparent, 1..3 = colour offset + code) into a 4bpp image at the origin (x at +0, y at +2, the
+ * image's width in pixels at +8). Rows before g_world_text_glyph_first_row or from g_world_text_glyph_row_limit on are skipped WITHOUT consuming their glyph bits (the BATTLE
+ * twin consumes the bits of the rows before the first one). The original parks s0-s7, v0 and v1 in the scratchpad; natively they are not. */
+void world_text_blit_font_glyph_to_4bpp(u8* glyph, void* arg1, u16* x, s32 arg3) {
+    s32 first_row = g_world_text_glyph_first_row, limit = g_world_text_glyph_row_limit, r, c;
+    u32 ox = x[0], oy = x[1], stride = (u32)x[4] >> 1;
+    u8* row = (u8*)arg1 + stride * oy;
+    u32 bits = *glyph, left = 4;
+    for (r = 0; r != 14; r++, row += stride) {
+        if (r < first_row || !(r < limit)) continue;
+        for (c = 0; c != 10; c++) {
+            u32 code = (bits & 0xc0) >> 6;
+            if (code) {
+                u32 value = code + (u32)arg3, px = (u32)c + ox;
+                u8* p = row + (px >> 1);
+                u32 b = *p;
+                if (!(px & 1)) b &= 0xf0; else { b &= 0x0f; value <<= 4; }
+                *p = (u8)(b | value);
+            }
+            bits <<= 2;
+            if (--left == 0) { left = 4; glyph++; bits = *glyph; }
+        }
+    }
+}
