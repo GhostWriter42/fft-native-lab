@@ -92,7 +92,9 @@ gte_u32 gte_mfc2(int reg) {
 }
 
 void gte_load_sv(int v, const void* p) {
+    static const gte_u32 low_ram[2] = { 0, 0 };
     const gte_u32* w = (const gte_u32*)p;
+    if (!w) w = low_ram;   /* the game loads a vector through a NULL pointer here and there (battle_unit_project_misc_to_screen): the console reads its low RAM, which is zero */
     gte_mtc2(2 * v, w[0]);
     gte_mtc2(2 * v + 1, w[1]);
 }

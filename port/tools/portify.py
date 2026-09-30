@@ -376,13 +376,14 @@ def main():
         ns = {}
         exec(compile(patch_file.read_text(encoding='utf-8'), str(patch_file), 'exec'), ns)
         for pt in ns.get('PATCHES', []):
-            dst = outdir / pt['file']
-            text = dst.read_bytes().decode('utf-8')
-            want = pt.get('count', 1)
-            if text.count(pt['old']) != want:
-                sys.exit(f"native patch must match {want} time(s) in {pt['file']}: {pt['old']!r} (found {text.count(pt['old'])})")
-            dst.write_bytes(text.replace(pt['old'], pt['new']).encode('utf-8'))
-            npatched += 1
+            for rel in (pt['files'] if 'files' in pt else [pt['file']]):          # `files`: the same edit in several twin sources
+                dst = outdir / rel
+                text = dst.read_bytes().decode('utf-8')
+                want = pt.get('count', 1)
+                if text.count(pt['old']) != want:
+                    sys.exit(f"native patch must match {want} time(s) in {rel}: {pt['old']!r} (found {text.count(pt['old'])})")
+                dst.write_bytes(text.replace(pt['old'], pt['new']).encode('utf-8'))
+                npatched += 1
     lines = [
         f"native patches applied:    {npatched} (port/native/native_patches.py)",
         f"files written:             {report['files']}",

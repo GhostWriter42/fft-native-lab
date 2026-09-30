@@ -79,6 +79,8 @@ unsigned int r3k_read32(r3k_t* c, unsigned int addr) { return rd32(c, addr); }
 void r3k_write32(r3k_t* c, unsigned int addr, unsigned int value) { wr32(c, addr, value); }
 
 void r3k_hle_add(r3k_t* c, unsigned int addr) { unsigned int w = (addr & 0x1fffffu) >> 2; c->hle_bitmap[w >> 3] |= (unsigned char)(1u << (w & 7)); }
+void r3k_tick_add(r3k_t* c, unsigned int addr) { unsigned int w = (addr & 0x1fffffu) >> 2; c->tick_bitmap[w >> 3] |= (unsigned char)(1u << (w & 7)); }
+void r3k_tick_remove(r3k_t* c, unsigned int addr) { unsigned int w = (addr & 0x1fffffu) >> 2; c->tick_bitmap[w >> 3] &= (unsigned char)~(1u << (w & 7)); }
 
 void r3k_reset(r3k_t* c, unsigned char* ram) {
     unsigned int i;
@@ -90,7 +92,7 @@ void r3k_reset(r3k_t* c, unsigned char* ram) {
     c->sp_top = 0x801fff00u;
     c->steps = 0; c->io_reads = c->io_writes = c->io_last_addr = 0; c->syscalls = c->bios_calls = c->rand_calls = 0;
     c->fault = 0; c->fault_pc = c->fault_instr = c->fault_addr = 0;
-    c->ncode = c->code_reads = c->code_writes = c->wild = c->nsdk = c->sdk_hits = 0; c->hle = 0; c->hle_calls = 0; { unsigned int q; for (q = 0; q < sizeof c->hle_bitmap; q++) c->hle_bitmap[q] = 0; } c->trace_calls = c->call_n = 0; c->call_hook = 0; c->event_hook = 0; c->pending_call = 0; c->cur_pc = 0; c->div_zero = c->div_overflow = 0; c->watch_lo = c->watch_hi = 0; c->wlog_n = 0;
+    c->ncode = c->code_reads = c->code_writes = c->wild = c->nsdk = c->sdk_hits = 0; c->hle = 0; c->hle_calls = 0; c->tick = 0; { unsigned int q; for (q = 0; q < sizeof c->hle_bitmap; q++) { c->hle_bitmap[q] = 0; c->tick_bitmap[q] = 0; } } c->trace_calls = c->call_n = 0; c->call_hook = 0; c->event_hook = 0; c->pending_call = 0; c->cur_pc = 0; c->div_zero = c->div_overflow = 0; c->watch_lo = c->watch_hi = 0; c->wlog_n = 0;
 }
 
 /* BIOS A-table entries that the game's C code reaches through the libc stubs (e.g. rand at 0x8002230c: li t2,0xa0; jr t2; li t1,0x2f). */
@@ -149,6 +151,10 @@ static int step(r3k_t* c) {
         c->pending_call = 0;
         if (c->call_n < 1024) { c->call_trace[c->call_n++] = cur; if (c->call_hook) c->call_hook(c, cur); }
         if (c->event_hook) c->event_hook(c, cur);
+    }
+    if (c->tick && phys < 0x200000u) {                                                 /* observed function entry: run the callback, then the function itself */
+        unsigned int w = phys >> 2;
+        if (c->tick_bitmap[w >> 3] & (1u << (w & 7))) c->tick(c, cur);
     }
     if (c->hle && phys < 0x200000u) {                                                  /* intercepted function entry */
         unsigned int w = phys >> 2;
@@ -235,6 +241,7 @@ static int step(r3k_t* c) {
         if (c->zero_frames && rt == 29 && rs == 29 && (imm & 0x8000u)) {                    /* a new stack frame: zero it (see r3k_t.zero_frames) */
             unsigned int lo = a + (unsigned int)SIGN16(imm), n = a - lo;
             if (lo >= 0x80000000u && a <= 0x80200000u && n <= 0x4000u) { unsigned char* z = c->ram + (lo & 0x1fffffu); unsigned int q; for (q = 0; q < n; q++) z[q] = 0; }
+            else if (lo >= 0x1f800000u && a <= 0x1f800400u) { unsigned char* z = c->scratch + (lo - 0x1f800000u); unsigned int q; for (q = 0; q < n; q++) z[q] = 0; }     /* a stack in the scratchpad (WLDCORE's frame code) */
         }
         SETR(rt, a + (unsigned int)SIGN16(imm)); break;
     case 10: SETR(rt, (int)a < SIGN16(imm)); break;

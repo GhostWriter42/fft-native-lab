@@ -10,6 +10,22 @@ set -e
 W=/tmp/ls; rm -rf $W; mkdir -p $W
 A=${A:-/ob/ls_pc}
 N=/port/build/native/ls
+# resolve the native addresses of a crash report (@0x080c...) to symbol+offset ($1 = the program's output)
+resolve() {
+  awk 'function hex(s,   i, v) { v = 0; s = tolower(s); for (i = 1; i <= length(s); i++) v = v * 16 + index("0123456789abcdef", substr(s, i, 1)) - 1; return v }
+       NR==FNR { if (NF>=3) { a[++n]=hex($1); s[n]=$3 } next }
+       { line=$0; res=""; while (match(line, /@0x[0-9a-f]+/)) {
+           v=hex(substr(line, RSTART+3, RLENGTH-3)); lo=1; hi=n; r=0
+           while (lo<=hi) { m=int((lo+hi)/2); if (a[m]<=v) { r=m; lo=m+1 } else hi=m-1 }
+           res = res substr(line, 1, RSTART-1) "@" substr(line, RSTART+1, RLENGTH-1) "(" (r? s[r] : "?") "+" (r? v-a[r] : 0) ")"; line=substr(line, RSTART+RLENGTH) }
+         print res line }' $N/ls_prog.nm "$1"
+}
+# RUN_ONLY: run the program an earlier build linked (soak.ps1 runs it once per random input script; /run.cfg carries frames and pad)
+if [ -n "$RUN_ONLY" ]; then
+  rc=0; /ob/ls_pc/prog > $W/out.txt 2>&1 || rc=$?
+  resolve $W/out.txt
+  exit $rc
+fi
 P=/port/build/portable/src/psyq/libgte
 FN=$N/fn_names.txt
 CF="-m32 -O1 -w -std=gnu89 -funsigned-char -fcommon -ffreestanding -fno-builtin -fno-pic -fno-pie -fno-stack-protector -fno-strict-aliasing -fno-aggressive-loop-optimizations -fno-tree-loop-distribute-patterns -fwrapv -fno-omit-frame-pointer -nostdinc -I/port/native/shim -I/port/native/gte -I/port/build/portable/include -I/port/native -I$N -I/port/build/native -include psx/gte_inline.h -DPC_SCHEME $EXTRA_CFLAGS"
@@ -70,13 +86,8 @@ comm -23 $W/undef_all.txt $W/known.txt | grep -vx g_stub_calls > $W/undef_other.
 if [ -s $W/undef_other.txt ]; then echo "undefined and not in any yaml: $(tr '\n' ' ' < $W/undef_other.txt)"; fi
 gcc -m32 -static -nostdlib -Wl,-e,_start -o $W/prog $(cat $W/objs.txt) $W/x_*.o $N/symbols_pc.ld
 nm -n $W/prog > $N/ls_prog.nm
+cp $W/prog /ob/ls_pc/prog
+if [ -n "$BUILD_ONLY" ]; then echo "linked /ob/ls_pc/prog"; exit 0; fi
 rc=0; $W/prog > $W/out.txt 2>&1 || rc=$?
-# resolve the native addresses of a crash report (@0x080c...) to symbol+offset
-awk 'function hex(s,   i, v) { v = 0; s = tolower(s); for (i = 1; i <= length(s); i++) v = v * 16 + index("0123456789abcdef", substr(s, i, 1)) - 1; return v }
-     NR==FNR { if (NF>=3) { a[++n]=hex($1); s[n]=$3 } next }
-     { line=$0; res=""; while (match(line, /@0x[0-9a-f]+/)) {
-         v=hex(substr(line, RSTART+3, RLENGTH-3)); lo=1; hi=n; r=0
-         while (lo<=hi) { m=int((lo+hi)/2); if (a[m]<=v) { r=m; lo=m+1 } else hi=m-1 }
-         res = res substr(line, 1, RSTART-1) "@" substr(line, RSTART+1, RLENGTH-1) "(" (r? s[r] : "?") "+" (r? v-a[r] : 0) ")"; line=substr(line, RSTART+RLENGTH) }
-       print res line }' $N/ls_prog.nm $W/out.txt
+resolve $W/out.txt
 exit $rc

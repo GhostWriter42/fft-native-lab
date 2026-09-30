@@ -47,8 +47,17 @@ def parse_lines(lines):
     return _parse(lines)
 
 
+# Code the decomp has not turned into functions yet (its yaml only NAMES the address): the native port supplies these itself (replacements/*.c).
+# {module: [(address, size, name)]}
+EXTRA_FUNCTIONS = {
+    'world': [(0x800e0228, 452, 'world_gs_sortpoly')],      # libgs GsSortPoly: a plain C routine of WORLD.BIN, listed in world.yaml only as a symbol
+}
+
+
 def _parse(lines):
     funcs, bare, hw = [], {}, {}
+    header = re.search(r'(?m)^module:\s*(\S+)', '\n'.join(lines[:16]))
+    extra = EXTRA_FUNCTIONS.get(header.group(1), []) if header else []
     for line in lines:
         r = fn_row.match(line)
         if r:
@@ -62,6 +71,10 @@ def _parse(lines):
         if r:
             hw[int(r.group(1), 16)] = int(r.group(2), 16)
     have = {a for a, _, _, _ in funcs}
+    for addr, size, name in extra:
+        if addr not in have:
+            funcs.append((addr, size, name, True))
+            have.add(addr)
     for addr, end in sorted(hw.items()):
         # every named entry inside the region is a routine (a region can hold several: wldcore_switch_to_stack / wldcore_restore_previous_stack);
         # `g_` names are data words parked among the code

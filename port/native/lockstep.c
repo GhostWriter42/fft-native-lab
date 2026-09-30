@@ -66,7 +66,7 @@ static int streq(const char* a, const char* b) { while (*a && *a == *b) { a++; b
 extern unsigned g_bios_rand_seed;                                            /* bios_rt.c: the native BIOS services (rand, memset, strlen, ...) */
 
 /* ------------------------------------------------------------------------------------------------- tables */
-struct mfn { unsigned int addr; unsigned int size; void* native; const char* name; };          /* gen_modules.py: one row per function of a module */
+struct mfn { unsigned int addr; unsigned int size; void* native; const char* name; int arity; };  /* gen_modules.py: one row per function of a module */
 struct module { const char* name; const char* file; unsigned int lba, sectors, load; const struct mfn* fns; int nfns; };
 extern const struct module g_modules[];                                     /* [0] = the main executable, then the overlays */
 extern const int g_module_count;
@@ -135,6 +135,39 @@ static void build_ranges(void) {
     }
     if (cursor < 0x801f0000u) { data_lo[ndata] = cursor; data_hi[ndata] = 0x801f0000u; ndata++; }
 }
+/* Function coverage: every trampoline jumps to a 16-byte thunk `inc dword [counter]; jmp native` (every call in the PS1-address scheme goes through the trampoline at the
+ * function's PS1 address, so the counters see every call). write_coverage() lists the functions that ran, per module, into /cov/hits.txt when that directory is mounted. */
+#define COV_MAX 8192
+#define THUNK_BASE 0x0a000000u
+#define THUNK_BYTES (16u * COV_MAX)
+static unsigned g_cov[COV_MAX];
+static unsigned fn_id(int mod, int i) { int m; unsigned id = 0; for (m = 0; m < mod; m++) id += (unsigned)g_modules[m].nfns; return id + (unsigned)i; }
+/* the functions whose entry is an observed tick of virtual time (hle.h HLE_TICK_NAMES): the thunk calls ls_native_tick() first; the interpreter side observes the same entries */
+struct hle_module_ticks { const char* module; const char* const* names; };
+extern const struct hle_module_ticks g_hle_module_ticks[];
+static int is_tick_fn(int mod, const char* name) {
+    int j, k;
+    for (j = 0; g_hle_module_ticks[j].module; j++) {
+        if (!streq(g_hle_module_ticks[j].module, g_modules[mod].name)) continue;
+        for (k = 0; g_hle_module_ticks[j].names[k]; k++) if (streq(g_hle_module_ticks[j].names[k], name)) return 1;
+    }
+    return 0;
+}
+extern void ls_native_tick(void);
+static unsigned thunk_target(int mod, int i, unsigned native) {
+    unsigned id = fn_id(mod, i);
+    unsigned char* t;
+    if (id >= COV_MAX) return native;
+    t = (unsigned char*)(THUNK_BASE + 16u * id);
+    t[0] = 0xff; t[1] = 0x05; *(unsigned*)(t + 2) = (unsigned)&g_cov[id];                 /* incl [g_cov + 4 * id] */
+    if (is_tick_fn(mod, g_modules[mod].fns[i].name)) {
+        t[6] = 0xe8; *(unsigned*)(t + 7) = (unsigned)ls_native_tick - ((unsigned)t + 11u);   /* call ls_native_tick (arguments and callee-saved registers are untouched) */
+        t[11] = 0xe9; *(unsigned*)(t + 12) = native - ((unsigned)t + 16u);                 /* jmp native */
+        return (unsigned)t;
+    }
+    t[6] = 0xe9; *(unsigned*)(t + 7) = native - ((unsigned)t + 11u);                       /* jmp native */
+    return (unsigned)t;
+}
 /* x86 `jmp` trampolines at the PS1 addresses of a module's natively compiled functions; returns how many were installed */
 static int install_module(int mod) {
     int i, n = 0;
@@ -142,11 +175,34 @@ static int install_module(int mod) {
         const struct mfn* f = &g_modules[mod].fns[i];
         if (f->native && f->size >= 5) {
             unsigned char* p = (unsigned char*)f->addr;
-            p[0] = 0xe9; *(unsigned*)(p + 1) = (unsigned)f->native - (f->addr + 5);
+            p[0] = 0xe9; *(unsigned*)(p + 1) = thunk_target(mod, i, (unsigned)f->native) - (f->addr + 5);
             n++;
         }
     }
     return n;
+}
+static char g_covbuf[1 << 17];
+static long g_covlen;
+static void cov_str(const char* t) { while (*t && g_covlen < (long)sizeof g_covbuf - 1) g_covbuf[g_covlen++] = *t++; }
+static void cov_num(unsigned x) { char d[12]; int q = 11; d[11] = 0; do { d[--q] = (char)('0' + x % 10); x /= 10; } while (x); cov_str(d + q); }
+static void cov_flush(long fd) { if (g_covlen) sys3(4, fd, (long)g_covbuf, g_covlen); g_covlen = 0; }
+static void write_coverage(void) {
+    long fd = sys3(5, (long)"/cov/hits.txt", 0x241, 0x1a4);
+    int m, i;
+    if (fd < 0) return;
+    g_covlen = 0;
+    for (m = 0; m < g_module_count; m++) {
+        unsigned nat = 0, hit = 0;
+        for (i = 0; i < g_modules[m].nfns; i++) { unsigned id = fn_id(m, i); if (g_modules[m].fns[i].native) nat++; if (id < COV_MAX && g_cov[id]) hit++; }
+        cov_str("module "); cov_str(g_modules[m].name); cov_str(" total "); cov_num((unsigned)g_modules[m].nfns); cov_str(" native "); cov_num(nat); cov_str(" hit "); cov_num(hit); cov_str("\n");
+        for (i = 0; i < g_modules[m].nfns; i++) {
+            unsigned id = fn_id(m, i);
+            if (id < COV_MAX && g_cov[id]) { cov_str(g_modules[m].fns[i].name); cov_str(" h\n"); }
+            if (g_covlen > (long)sizeof g_covbuf - 400) cov_flush(fd);
+        }
+    }
+    cov_flush(fd);
+    sys3(6, fd, 0, 0);
 }
 /* the code bytes of the module that is going away come back from the interpreter's RAM (which holds whatever the game put there) */
 static void uninstall_module(int mod);
@@ -183,6 +239,29 @@ static int ignored_word(unsigned a) {
     }
     return 0;
 }
+/* Stack addresses are machine-specific: the two machines' frames differ in layout (x86 vs MIPS), and a thread's private stack is a 0x400-byte part of its RAM record in
+ * the original but lives in the thread-stack window natively. A word that holds such an address (a pointer, or a GPU ordering-table tag: packet length in the top byte, 24-bit
+ * link) is "equal" when both machines' values point into the same stack: class 1 = the main stack, 2 + s = battle thread s, 32 + s = world thread s. */
+static int stack_class(unsigned v, int native) {
+    if (v >= 0x801f0000u && v < 0x80200000u) return 1;
+    if (native && v >= MAIN_STACK_WINDOW && v < MAIN_STACK_WINDOW + MAIN_STACK_BYTES) return 1;
+    if (native) {
+        if (v >= THREAD_STACK_WINDOW && v < THREAD_STACK_WINDOW + 16u * THREAD_STACK_BYTES) return 2 + (int)((v - THREAD_STACK_WINDOW) / THREAD_STACK_BYTES);
+        if (v >= THREAD_STACK_WINDOW + THREAD_STACK_WORLD_OFFSET && v < THREAD_STACK_WINDOW + THREAD_STACK_WORLD_OFFSET + 17u * THREAD_STACK_BYTES)
+            return 32 + (int)((v - THREAD_STACK_WINDOW - THREAD_STACK_WORLD_OFFSET) / THREAD_STACK_BYTES);
+    } else {
+        unsigned base = (unsigned)g_battle_thread_contexts, wbase = (unsigned)g_world_thread_contexts;
+        if (v >= base && v < base + 16u * 0x400u) return 2 + (int)((v - base) / 0x400u);
+        if (v >= wbase && v < wbase + 17u * 0x400u) return 32 + (int)((v - wbase) / 0x400u);
+    }
+    return 0;
+}
+static int stackish_equal(unsigned x, unsigned y) {                         /* x: the native machine's word, y: the original's */
+    int c = stack_class(x, 1);
+    if (c && c == stack_class(y, 0)) return 1;
+    if ((x >> 24) == (y >> 24)) { c = stack_class(0x80000000u | (x & 0xffffffu), 1); if (c && c == stack_class(0x80000000u | (y & 0xffffffu), 0)) return 1; }
+    return 0;
+}
 static void copy_data_interp_to_native(void) {
     int i;
     for (i = 0; i < ndata; i++) {
@@ -197,11 +276,7 @@ static int compare_ram(int show) {
     for (r = 0; r < ndata; r++)
         for (a = data_lo[r]; a < data_hi[r]; a += 4) {
             unsigned x = *(unsigned*)a, y = *(unsigned*)(interp_ram + (a & 0x1fffff));
-            /* two pointers into the stack region are "equal": the machines' stack frames have different layouts (x86 vs MIPS); the same holds for
-             * GPU ordering-table tags (packet length in the top byte, 24-bit link) that point at a packet in a stack frame */
-            if (x != y && !(x >= 0x801f0000u && y >= 0x801f0000u && x < 0x80200000u && y < 0x80200000u)
-                && !((x >> 24) == (y >> 24) && (x & 0xffffffu) >= 0x1f0000u && (y & 0xffffffu) >= 0x1f0000u && (x & 0xffffffu) < 0x200000u && (y & 0xffffffu) < 0x200000u)
-                && !ignored_word(a)) {
+            if (x != y && !stackish_equal(x, y) && !ignored_word(a)) {
                 if (show && diffs < show) { out("    "); label(a); out("  native "); outhex(x); out("  original "); outhex(y); out("\n"); }
                 diffs++;
             }
@@ -250,9 +325,48 @@ static int is_overlay_lba(void* ctx, unsigned lba) { (void)ctx; return module_at
 static const unsigned g_pad_script[][2] = {
 #include "pad_script.h"
     , { 0xffffffffu, 0 } };
+/* run-time configuration (the wrapper mounts /run.cfg): "frames N" and "pad FRAME BUTTONS" lines (decimal or 0x..); overrides the compile-time MAX_FRAMES / pad script,
+ * so that one linked program serves many runs (soak.ps1) */
+static unsigned g_frames = MAX_FRAMES;
+static unsigned g_padrt[65536][2];
+static int g_npadrt;
+/* "pokewhen CADDR CVAL ADDR VAL [REPEAT]": once (every time, with REPEAT = 1), at the start of the first frame in which the (interpreter-side) word at CADDR equals CVAL, VAL is stored into the word at ADDR on BOTH
+ * machines -- a cheat that steers the game into states random input rarely reaches (for instance, ending the first battle to get to the world map) */
+static struct { unsigned caddr, cval, addr, val, repeat; int done; } g_pokes[64];
+static int g_npokes;
+static unsigned parse_num(const char** pp) {
+    const char* p = *pp;
+    unsigned v = 0;
+    while (*p == ' ' || *p == '\t') p++;
+    if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) { p += 2; while ((*p >= '0' && *p <= '9') || (*p >= 'a' && *p <= 'f') || (*p >= 'A' && *p <= 'F')) { v = v * 16 + (unsigned)(*p <= '9' ? *p - '0' : (*p | 32) - 'a' + 10); p++; } }
+    else while (*p >= '0' && *p <= '9') { v = v * 10 + (unsigned)(*p - '0'); p++; }
+    *pp = p;
+    return v;
+}
+static void load_run_config(void) {
+    static char buf[1 << 21];
+    long n = load_file("/run.cfg", (unsigned char*)buf);
+    const char* p = buf;
+    if (n <= 0 || n >= (long)sizeof buf - 1) return;
+    buf[n] = 0;
+    while (*p) {
+        if (p[0] == 'f' && p[1] == 'r') { p += 6; g_frames = parse_num(&p); }                 /* frames N */
+        else if (p[0] == 'p' && p[1] == 'o') {                                                 /* pokewhen CADDR CVAL ADDR VAL */
+            if (g_npokes < 64) { p += 9; g_pokes[g_npokes].caddr = parse_num(&p); g_pokes[g_npokes].cval = parse_num(&p); g_pokes[g_npokes].addr = parse_num(&p); g_pokes[g_npokes].val = parse_num(&p); g_pokes[g_npokes].repeat = parse_num(&p); g_pokes[g_npokes].done = 0; g_npokes++; }
+        }
+        else if (p[0] == 'p' && p[1] == 'a') {                                                 /* pad FRAME BUTTONS */
+            unsigned f, b;
+            p += 3; f = parse_num(&p); b = parse_num(&p);
+            if (g_npadrt < 65536) { g_padrt[g_npadrt][0] = f; g_padrt[g_npadrt][1] = b; g_npadrt++; }
+        }
+        while (*p && *p != '\n') p++;
+        if (*p) p++;
+    }
+}
 static unsigned pad_at(unsigned frame) {
     unsigned mask = 0;
     int i;
+    if (g_npadrt) { for (i = 0; i < g_npadrt && g_padrt[i][0] <= frame; i++) mask = g_padrt[i][1]; return mask; }
     for (i = 0; g_pad_script[i][0] != 0xffffffffu; i++) if (g_pad_script[i][0] <= frame) mask = g_pad_script[i][1];
     return mask;
 }
@@ -308,6 +422,7 @@ static void unhook(unsigned addr);
 static unsigned g_scn_addr;
 static int g_scn_active;
 #endif
+static void interp_tick(r3k_t* c, unsigned addr) { (void)c; (void)addr; hle_tick(&hle_i); }
 static int interp_hle(r3k_t* c, unsigned addr) {
     int i, arity = 4;
     const char* n = 0;
@@ -332,8 +447,19 @@ static int interp_hle(r3k_t* c, unsigned addr) {
 static void unhook(unsigned addr) { unsigned w = (addr & 0x1fffffu) >> 2; cpu.hle_bitmap[w >> 3] &= (unsigned char)~(1u << (w & 7)); }
 /* the interpreter intercepts the ORIGINAL entry addresses of the functions the HLE takes over, only while their module is loaded
  * (an overlay's addresses hold other code before and after) */
+static void install_tick_hooks(int mod, int on) {
+    int j, k;
+    for (j = 0; g_hle_module_ticks[j].module; j++) {
+        if (!streq(g_hle_module_ticks[j].module, g_modules[mod].name)) continue;
+        for (k = 0; g_hle_module_ticks[j].names[k]; k++) {
+            unsigned a = addr_in(mod, g_hle_module_ticks[j].names[k]);
+            if (a) { if (on) r3k_tick_add(&cpu, a); else r3k_tick_remove(&cpu, a); }
+        }
+    }
+}
 static int install_hle_hooks(int mod) {
     int j, i, n = 0;
+    install_tick_hooks(mod, 1);
     for (j = 0; j < g_hle_module_name_count; j++) {
         if (!streq(g_hle_module_names[j].module, g_modules[mod].name)) continue;
         for (i = 0; i < g_hle_module_names[j].count && n_hooks < 1024; i++) {
@@ -345,6 +471,7 @@ static int install_hle_hooks(int mod) {
 }
 static void remove_hle_hooks(int mod) {
     int i, k = 0;
+    install_tick_hooks(mod, 0);
     for (i = 0; i < n_hooks; i++) {
         if (g_hooks[i].module == mod) unhook(g_hooks[i].addr);
         else g_hooks[k++] = g_hooks[i];
@@ -385,12 +512,13 @@ static unsigned nb_r8(void* c, unsigned a) { (void)c; return *(volatile unsigned
 static int nb_valid(void* c, unsigned a) { (void)c; return (a >= 0x80000000u && a < 0x80200000u) || (a >= THREAD_STACK_WINDOW && a < THREAD_STACK_WINDOW + THREAD_STACK_WINDOW_BYTES); }
 static void nb_w8(void* c, unsigned a, unsigned v) { (void)c; *(volatile unsigned char*)a = (unsigned char)v; }
 static void nb_wb(void* c, unsigned a, const unsigned char* s, unsigned n) { unsigned k; (void)c; for (k = 0; k < n; k++) ((volatile unsigned char*)a)[k] = s[k]; }
+void ls_native_tick(void) { hle_tick(&g_hle_native); }
 extern unsigned g_ls_ignore_enter;
 static unsigned nb_call(void* c, unsigned addr, unsigned a0, unsigned a1) { (void)c; g_ls_ignore_enter = 1; return ((unsigned (*)(unsigned, unsigned))addr)(a0, a1); }
 static void nb_frame(void* c) { (void)c; ls_switch(&g_game_esp, g_driver_esp); }
 static void start_native_game(void) {
     /* the game's stack lives in the RAM image, at the top like the console's: locals whose addresses go into GPU ordering tables / RAM structures keep valid 24-bit PS1 addresses */
-    unsigned* top = (unsigned*)0x80200000u;
+    unsigned* top = (unsigned*)(MAIN_STACK_WINDOW + MAIN_STACK_BYTES);
     top -= 5;
     *--top = (unsigned)game_entry;
     *--top = 0; *--top = 0; *--top = 0; *--top = 0;
@@ -404,24 +532,63 @@ static void scn_wrapper(void) { native_main_item_init_new_game_inventory(); *(vo
 
 /* -------------------------------------------------------------------------- crash report for the native side */
 static const char* g_where = "before main";
+static int g_cur_frame;                                                     /* the frame the driver is running (both machines) */
 struct ksigaction { void (*handler)(int, void*, void*); unsigned long flags; void (*restorer)(void); unsigned long long mask; };
+/* The retail code sometimes reads (or writes) through a NULL pointer: the console has RAM there (its low kernel area, zero in the oracle), a native process does not. When the
+ * container allows it (--cap-add SYS_RAWIO lets a root process map below vm.mmap_min_addr) page zero is mapped zero-filled but kept PROT_NONE: the first touch in a frame faults,
+ * the handler records the site (the report at the end lists them: each is a place where a reviewed source patch is needed for a build that cannot map page zero), opens the page
+ * and lets the instruction go on; the driver closes it again at the next frame. */
+#define NULL_PAGE_BYTES 0x10000u
+static int g_null_page_mapped, g_null_page_open;
+static unsigned g_null_sites[64];
+static int g_n_null_sites;
+__asm__(".text\n"
+        ".globl ls_sig_restorer\n"
+        "ls_sig_restorer:\n"
+        "    movl $173, %eax\n"                                      /* rt_sigreturn */
+        "    int $0x80\n");
+extern void ls_sig_restorer(void);
+static void null_page_close(void) { if (g_null_page_mapped && g_null_page_open) { sys3(125, 0, NULL_PAGE_BYTES, 0); g_null_page_open = 0; } }   /* mprotect(PROT_NONE) */
+static void report_null_sites(void) {
+    int i;
+    if (!g_n_null_sites) return;
+    out("NULL-PAGE ACCESS by the native game (retail reads console RAM at address 0..0xffff there) at:");
+    for (i = 0; i < g_n_null_sites; i++) { out(" @0x"); outhex(g_null_sites[i]); }
+    out("\n");
+}
+static void (*g_crash_context)(void);                                       /* set by the replay: where in the replayed frame the native game was */
 static void fault_handler(int sig, void* info, void* uc) {
     unsigned eip = *(unsigned*)((char*)uc + 76), ebp = *(unsigned*)((char*)uc + 44);
     int depth;
+    if (sig == 11 && g_null_page_mapped && *(unsigned*)((char*)info + 12) < NULL_PAGE_BYTES) {          /* a touch of the NULL page: note the site, open the page, retry */
+        int k, known = 0;
+        for (k = 0; k < g_n_null_sites; k++) if (g_null_sites[k] == eip) known = 1;
+        if (!known && g_n_null_sites < 64) g_null_sites[g_n_null_sites++] = eip;
+        sys3(125, 0, NULL_PAGE_BYTES, 3);                                                              /* mprotect(PROT_READ | PROT_WRITE) */
+        g_null_page_open = 1;
+        return;
+    }
+    report_null_sites();
     out(sig == 14 ? "\nNATIVE HANG (no VSync within the watchdog time): signal " : "\nNATIVE CRASH: signal "); outnum(sig); out(" at @0x"); outhex(eip); out(", address 0x"); outhex(*(unsigned*)((char*)info + 12));
-    out("; last sync: "); out(g_where); out(", native VSync count "); outnum(g_hle_native.frame_counter); out("\n  backtrace:");
+    out("; last sync: "); out(g_where); out(", native VSync count "); outnum(g_hle_native.frame_counter); out("; driver frame "); outnum(g_cur_frame); out("\n  backtrace:");
     for (depth = 0; depth < 24 && ebp >= 0x08000000u && ebp < 0xc0000000u && (ebp & 3) == 0; depth++) {
         unsigned ra = ((unsigned*)ebp)[1];
         out(" @0x"); outhex(ra);
         if (((unsigned*)ebp)[0] <= ebp) break;
         ebp = ((unsigned*)ebp)[0];
     }
+    out("\n  stack top:");
+    {   unsigned sp = *(unsigned*)((char*)uc + 48), q;
+        for (q = 0; q < 12 && sp >= 0x08000000u && sp < 0xc0000000u; q++) { out(" @0x"); outhex(((unsigned*)sp)[q]); }
+    }
     out("\n");
+    if (g_crash_context) g_crash_context();
+    write_coverage();
     sys3(1, 3, 0, 0);
 }
 static void install_fault_handlers(void) {
     struct ksigaction sa;
-    sa.handler = fault_handler; sa.flags = 4 | 0x40000000; sa.restorer = 0; sa.mask = 0;
+    sa.handler = fault_handler; sa.flags = 4 | 0x40000000 | 0x04000000; sa.restorer = ls_sig_restorer; sa.mask = 0;      /* SA_SIGINFO | SA_NODEFER | SA_RESTORER */
     sys4(174, 11, (long)&sa, 0, 8); sys4(174, 8, (long)&sa, 0, 8); sys4(174, 7, (long)&sa, 0, 8); sys4(174, 4, (long)&sa, 0, 8); sys4(174, 14, (long)&sa, 0, 8);   /* SIGALRM: the native watchdog */
 }
 
@@ -432,16 +599,27 @@ static void install_fault_handlers(void) {
  * difference -- a different callee, or more calls than the original made (a native hang) -- stops the native game on the spot: the function that ran
  * just before it made a different decision. Needs the game compiled with -finstrument-functions (lockstep.ps1 does). */
 #define EV_MAX 600000
-static unsigned ev_int[EV_MAX], ev_a0[EV_MAX], ev_a1[EV_MAX];
+static unsigned ev_int[EV_MAX], ev_a0[EV_MAX], ev_a1[EV_MAX], ev_ra[EV_MAX];                /* ev_ra: $ra at the call = where the callee returns to (its caller) */
 #define EV_SCR_MAX 150000                                                   /* the first 8 words of the scratchpad at each of the original's first calls (the native game is compared with them) */
 static unsigned ev_scr[EV_SCR_MAX][8];
 static unsigned ev_w[EV_SCR_MAX][4];                                        /* the first 4 -Watch words at each of the original's first calls */
 static unsigned g_div_scratch, g_div_scr_native[8], g_div_watch, g_div_w_native;
+/* Arguments: at each call the original's argument registers a0-a3 are recorded together with the first 8 words each pointer argument points at; the native call is compared
+ * (as many arguments as the function declares) and every difference is LOGGED (the first few are printed with the report): a wrong argument is often the first visible
+ * sign of a value that was computed differently -- or of a call that retail makes without loading its arguments. */
+#define ARG_WORDS 2                                                         /* words compared at the target of a pointer argument */
+static unsigned ev_arg[EV_SCR_MAX][4];
+static unsigned ev_pt[EV_SCR_MAX][4][8];
+static unsigned char ev_ptv[EV_SCR_MAX];                                    /* bit j: argument j is a pointer with a recorded pointee */
+#define ARGMIS_MAX 64
+static struct { unsigned idx; int arg, word; unsigned nat, org; } g_argmis[ARGMIS_MAX];
+static int n_argmis, g_argmis_total;
 static unsigned n_ev_int, g_ev_idx;
 static int g_trace_on;                                                      /* 0 off, 1 recording the original, 2 comparing the native game */
 static unsigned g_div_idx, g_div_got, g_div_want;
 extern unsigned g_ls_ignore_enter;
 static unsigned nat_key[8192], nat_val[8192], ps1_key[8192];
+static int nat_ar[8192];
 static int n_nat, n_ps1;
 static int no_event_name(const char* n) {                                   /* BIOS veneers: compiler-generated calls to them exist only natively */
     static const char* const list[] = { "memset", "psyq_api_memcpy", "memmove", "bzero", "bcopy", "strlen", "strcpy", "strcmp", "strcat", "memchr", "rand", "srand",
@@ -454,6 +632,10 @@ static void sort_pairs(unsigned* k, unsigned* v, int n) {                   /* i
     int i, j;
     for (i = 1; i < n; i++) { unsigned kk = k[i], vv = v ? v[i] : 0; for (j = i - 1; j >= 0 && k[j] > kk; j--) { k[j + 1] = k[j]; if (v) v[j + 1] = v[j]; } k[j + 1] = kk; if (v) v[j + 1] = vv; }
 }
+static void sort_triples(unsigned* k, unsigned* v, int* w, int n) {         /* insertion sort by key, v and w follow */
+    int i, j;
+    for (i = 1; i < n; i++) { unsigned kk = k[i], vv = v[i]; int ww = w[i]; for (j = i - 1; j >= 0 && k[j] > kk; j--) { k[j + 1] = k[j]; v[j + 1] = v[j]; w[j + 1] = w[j]; } k[j + 1] = kk; v[j + 1] = vv; w[j + 1] = ww; }
+}
 static void build_event_tables(void) {
     int m, i;
     n_nat = n_ps1 = 0;
@@ -463,13 +645,26 @@ static void build_event_tables(void) {
             const struct mfn* f = &g_modules[mod].fns[i];
             if (no_event_name(f->name) || n_ps1 >= 8192) continue;
             ps1_key[n_ps1++] = f->addr;
-            if (f->native && n_nat < 8192) { nat_key[n_nat] = (unsigned)f->native; nat_val[n_nat] = f->addr; n_nat++; }
+            if (f->native && n_nat < 8192) { nat_key[n_nat] = (unsigned)f->native; nat_val[n_nat] = f->addr; nat_ar[n_nat] = f->arity; n_nat++; }
         }
     }
     sort_pairs(ps1_key, 0, n_ps1);
-    sort_pairs(nat_key, nat_val, n_nat);
+    sort_triples(nat_key, nat_val, nat_ar, n_nat);
 }
 static int find_key(const unsigned* k, int n, unsigned x) { int lo = 0, hi = n - 1; while (lo <= hi) { int mid = (lo + hi) / 2; if (k[mid] == x) return mid; if (k[mid] < x) lo = mid + 1; else hi = mid - 1; } return -1; }
+static int arg_is_ptr(unsigned v) { return (v >= 0x80000000u && v < 0x80200000u) || (v >= 0x1f800000u && v < 0x1f800400u) || (v >= THREAD_STACK_WINDOW && v < THREAD_STACK_WINDOW + THREAD_STACK_WINDOW_BYTES); }
+static int arg_in_stack(unsigned v) { return (v >= 0x801f0000u && v < 0x80200000u) || (v >= MAIN_STACK_WINDOW && v < MAIN_STACK_WINDOW + MAIN_STACK_BYTES); }
+static int arg_pointee_ok(unsigned v) {                                     /* data, stack or scratchpad (code bytes differ by construction: trampolines) */
+    int r;
+    unsigned a = v & ~3u;
+    if (v >= 0x1f800000u && v < 0x1f800400u) return a + 32 <= 0x1f800400u;
+    if (a >= THREAD_STACK_WINDOW && a + 32 <= THREAD_STACK_WINDOW + THREAD_STACK_WINDOW_BYTES) return 1;      /* a native thread's stack */
+    if (a + 32 > 0x80200000u) return 0;
+    if (arg_in_stack(v)) return 1;
+    for (r = 0; r < ndata; r++) if (a >= data_lo[r] && a + 32 <= data_hi[r]) return 1;
+    return 0;
+}
+static unsigned orig_word(unsigned a) { return a >= 0x1f800000u && a < 0x1f800400u ? *(unsigned*)(cpu.scratch + (a - 0x1f800000u)) : *(unsigned*)(interp_ram + (a & 0x1fffff)); }
 static void ls_event_hook(r3k_t* c, unsigned target) {                      /* the interpreter: every jal/jalr/j target that is a function entry */
     if (g_trace_on != 1) return;
     if (untraced_caller(c->r[31])) return;                                  /* a call made from inside the natively replaced libgte */
@@ -479,8 +674,15 @@ static void ls_event_hook(r3k_t* c, unsigned target) {                      /* t
             int k;
             for (k = 0; k < 8; k++) ev_scr[n_ev_int][k] = ((unsigned*)c->scratch)[SCRATCH_FIRST_COMPARED + k];
             for (k = 0; k < 4; k++) ev_w[n_ev_int][k] = g_watch[k].addr ? *(unsigned*)(interp_ram + (g_watch[k].addr & 0x1fffff)) : 0;
+            ev_ptv[n_ev_int] = 0;
+            for (k = 0; k < 4; k++) {
+                unsigned v = c->r[4 + k];
+                int q;
+                ev_arg[n_ev_int][k] = v;
+                if (arg_is_ptr(v) && arg_pointee_ok(v)) { ev_ptv[n_ev_int] |= (unsigned char)(1u << k); for (q = 0; q < 8; q++) ev_pt[n_ev_int][k][q] = orig_word((v & ~3u) + 4u * (unsigned)q); }
+            }
         }
-        ev_a0[n_ev_int] = c->r[4]; ev_a1[n_ev_int] = c->r[5]; ev_int[n_ev_int++] = target;
+        ev_a0[n_ev_int] = c->r[4]; ev_a1[n_ev_int] = c->r[5]; ev_ra[n_ev_int] = c->r[31]; ev_int[n_ev_int++] = target;
     }
 }
 void __attribute__((no_instrument_function)) __cyg_profile_func_enter(void* fn, void* site) {
@@ -513,13 +715,53 @@ void __attribute__((no_instrument_function)) __cyg_profile_func_enter(void* fn, 
             ls_switch(&g_game_esp, g_driver_esp);
             return;
         }
+        {   /* the arguments (cdecl: on the caller's frame, right above its return address) */
+            unsigned* fp = (unsigned*)__builtin_frame_address(1);
+            int ar = nat_ar[k], lim = ar < 0 ? 0 : (ar > 4 ? 4 : ar);
+            for (j = 0; j < lim; j++) {
+                unsigned na = fp[2 + j], oa = ev_arg[g_ev_idx][j];
+                int bad = 0, word = -1;
+                unsigned nv = na, ov = oa;
+                if (arg_is_ptr(na) && arg_is_ptr(oa)) {
+                    if (na != oa && !stackish_equal(na, oa)) bad = 1;                               /* two addresses in the same stack are "equal" (the frames differ) */
+                    if (!bad && (ev_ptv[g_ev_idx] & (1u << j)) && arg_pointee_ok(na)) {
+                        int q;
+                        for (q = 0; q < ARG_WORDS; q++) { unsigned x = *(unsigned*)((na & ~3u) + 4u * (unsigned)q), y = ev_pt[g_ev_idx][j][q]; if (x != y) { bad = 1; word = q; nv = x; ov = y; break; } }
+                    }
+                } else if (na != oa) bad = 1;
+                if (bad) {
+                    int slot = g_argmis_total % ARGMIS_MAX;                                             /* a ring: the differences nearest to the divergence are the interesting ones */
+                    g_argmis_total++;
+                    g_argmis[slot].idx = g_ev_idx; g_argmis[slot].arg = j; g_argmis[slot].word = word; g_argmis[slot].nat = nv; g_argmis[slot].org = ov;
+                    n_argmis = g_argmis_total < ARGMIS_MAX ? g_argmis_total : ARGMIS_MAX;
+                }
+            }
+        }
     }
     g_ev_idx++;
 }
 void __attribute__((no_instrument_function)) __cyg_profile_func_exit(void* fn, void* site) { (void)fn; (void)site; }
 static void print_fn_ps1(unsigned a) { func_at(a); }
+static void print_argmis(void) {
+    int i;
+    if (!g_argmis_total) return;
+    out("  argument differences at calls before this point (native vs original; "); outnum(g_argmis_total); out(" in all, the last "); outnum(n_argmis); out("):\n");
+    for (i = 0; i < n_argmis; i++) {
+        int slot = g_argmis_total <= ARGMIS_MAX ? i : (g_argmis_total + i) % ARGMIS_MAX;
+        outnum(g_argmis[slot].idx); out("  "); print_fn_ps1(ev_int[g_argmis[slot].idx]); out("  a"); outnum(g_argmis[slot].arg);
+        if (g_argmis[slot].word >= 0) { out(" -> word "); outnum(g_argmis[slot].word); out(" of the pointee"); }
+        out(":  native "); outhex(g_argmis[slot].nat); out("  original "); outhex(g_argmis[slot].org); out("\n");
+    }
+}
+static void replay_crash_context(void) {
+    unsigned k;
+    out("  the native game crashed in the replayed frame after "); outnum(g_ev_idx); out(" calls (the original's call sequence, function entries):\n");
+    for (k = g_ev_idx > 14 ? g_ev_idx - 14 : 0; k < g_ev_idx + 3 && k < n_ev_int; k++) { out(k < g_ev_idx ? "    #" : "    (next) #"); outnum(k); out("  "); print_fn_ps1(ev_int[k]); out("\n"); }
+    print_argmis();
+}
 static void report_divergence(unsigned idx, unsigned got, unsigned want, int native_short) {
     unsigned k;
+    print_argmis();
     out("  call sequence of the frame (the original's, function entries):\n");
     for (k = idx > 12 ? idx - 12 : 0; k < idx; k++) { out("    #"); outnum(k); out("  "); print_fn_ps1(ev_int[k]); out("\n"); }
     if (g_div_watch) {
@@ -694,14 +936,15 @@ static void report_bad_ot(void) {
 static int main_test(void) {
     int frame, rn, ro, diffs;
     hle_platform_t pa, pb;
-    pa.ctx = (void*)"original"; pa.r8 = ia_r8; pa.w8 = ia_w8; pa.write_bytes = ia_wb; pa.call = ia_call; pa.read_sector = read_sector; pa.frame = ia_frame; pa.log = log_call; pa.is_overlay = is_overlay_lba; pa.interp_reexec = 1; pa.valid = ia_valid;
-    pb.ctx = (void*)"native"; pb.r8 = nb_r8; pb.w8 = nb_w8; pb.write_bytes = nb_wb; pb.call = nb_call; pb.read_sector = read_sector; pb.frame = nb_frame; pb.log = log_call; pb.is_overlay = is_overlay_lba; pb.interp_reexec = 0; pb.valid = nb_valid;
+    pa.ctx = (void*)"original"; pa.r8 = ia_r8; pa.w8 = ia_w8; pa.write_bytes = ia_wb; pa.call = ia_call; pa.read_sector = read_sector; pa.frame = ia_frame; pa.log = log_call; pa.is_overlay = is_overlay_lba; pa.interp_reexec = 1; pa.valid = ia_valid; pa.stack_lo = pa.stack_hi = 0;
+    pb.ctx = (void*)"native"; pb.r8 = nb_r8; pb.w8 = nb_w8; pb.write_bytes = nb_wb; pb.call = nb_call; pb.read_sector = read_sector; pb.frame = nb_frame; pb.log = log_call; pb.is_overlay = is_overlay_lba; pb.interp_reexec = 0; pb.valid = nb_valid; pb.stack_lo = MAIN_STACK_WINDOW; pb.stack_hi = MAIN_STACK_WINDOW + MAIN_STACK_BYTES;
     hle_init(&hle_i, &pa);
     hle_init(&g_hle_native, &pb);
 
     /* --- run the ORIGINAL from the entry point to main() --- */
     g_main_addr = addr_of("main");
     cpu.hle = interp_hle;
+    cpu.tick = interp_tick;
     install_hle_hooks(0);
     r3k_hle_add(&cpu, g_main_addr);
 #ifdef SCENARIO_TITLE
@@ -721,8 +964,19 @@ static int main_test(void) {
     start_native_game();
 
     /* --- frame by frame --- */
-    for (frame = 1; frame <= MAX_FRAMES; frame++) {
+    for (frame = 1; frame <= (int)g_frames; frame++) {
+        g_cur_frame = frame;
         g_hle_native.pad_mask = hle_i.pad_mask = pad_at((unsigned)frame);                  /* both machines see the same controller */
+        null_page_close();
+        {   int q;
+            for (q = 0; q < g_npokes; q++) {
+                if (g_pokes[q].done || *(unsigned*)(interp_ram + (g_pokes[q].caddr & 0x1fffff)) != g_pokes[q].cval) continue;
+                *(volatile unsigned*)g_pokes[q].addr = g_pokes[q].val;                       /* native RAM */
+                *(unsigned*)(interp_ram + (g_pokes[q].addr & 0x1fffff)) = g_pokes[q].val;    /* the interpreter's RAM */
+                g_pokes[q].done = g_pokes[q].repeat ? 0 : 1;                                  /* a repeating poke fires whenever its condition holds again */
+                out("  [frame "); outnum(frame); out("] poke: *0x"); outhex(g_pokes[q].addr); out(" = 0x"); outhex(g_pokes[q].val); out(" (when *0x"); outhex(g_pokes[q].caddr); out(" == 0x"); outhex(g_pokes[q].cval); out(")\n");
+            }
+        }
         hle_i.trace_n = g_hle_native.trace_n = 0; hle_i.trace_lost = g_hle_native.trace_lost = 0;
         hle_i.otdump_n = g_hle_native.otdump_n = 0;
 #ifdef REPLAY_FRAME
@@ -730,7 +984,7 @@ static int main_test(void) {
             build_event_tables(); n_ev_int = 0; g_ev_idx = 0; g_ls_ignore_enter = 0;
             cpu.trace_calls = 1; cpu.pending_call = 0; cpu.event_hook = ls_event_hook; g_trace_on = 1;
             ro = run_orig();
-            cpu.trace_calls = 0; cpu.pending_call = 0; cpu.event_hook = 0; g_trace_on = 2;
+            cpu.trace_calls = 0; cpu.pending_call = 0; cpu.event_hook = 0; g_trace_on = 2; g_crash_context = replay_crash_context;
             if (!ro) { out("FRAME "); outnum(frame); out(": the ORIGINAL did not reach its next VSync (rc "); outnum(g_orig_rc); out(") -- a loop in the original itself, not a native divergence\n"); print_event_histogram(); print_orig_state(); report_stubs(); return 1; }
 #ifdef DUMP_AROUND
             {   /* the calls around the first entry of one function (-DumpAround name) */
@@ -739,18 +993,18 @@ static int main_test(void) {
                 for (mm = 0; mm <= g_nactive && !target; mm++) target = addr_in(mm == 0 ? 0 : g_active[mm - 1], DUMP_AROUND);
                 for (k = 0; k < n_ev_int; k++) if (ev_int[k] == target) { first = k; break; }
                 if (first == 0xffffffffu) out("  the function to dump around was never called in this frame\n");
-                else for (k = first > 30 ? first - 30 : 0; k < first + 60 && k < n_ev_int; k++) { out("    #"); outnum(k); out("  "); print_fn_ps1(ev_int[k]); out("  a0=0x"); outhex(ev_a0[k]); out(" a1=0x"); outhex(ev_a1[k]); out("\n"); }
+                else for (k = first > 30 ? first - 30 : 0; k < first + 60 && k < n_ev_int; k++) { out("    #"); outnum(k); out("  "); print_fn_ps1(ev_int[k]); out("  a0=0x"); outhex(ev_a0[k]); out(" a1=0x"); outhex(ev_a1[k]); out("  from "); func_at(ev_ra[k] - 8); out("\n"); }
             }
 #endif
 #ifdef EVENT_DUMP
-            { unsigned k; out("  the original's first calls of the frame (function, a0, a1):\n"); for (k = 0; k < (unsigned)EVENT_DUMP && k < n_ev_int; k++) { out("    #"); outnum(k); out("  "); print_fn_ps1(ev_int[k]); out("  a0=0x"); outhex(ev_a0[k]); out(" a1=0x"); outhex(ev_a1[k]); out("\n"); } }
+            { unsigned k; out("  the original's first calls of the frame (function, a0, a1):\n"); for (k = 0; k < (unsigned)EVENT_DUMP && k < n_ev_int; k++) { out("    #"); outnum(k); out("  "); print_fn_ps1(ev_int[k]); out("  a0=0x"); outhex(ev_a0[k]); out(" a1=0x"); outhex(ev_a1[k]); out("  from "); func_at(ev_ra[k] - 8); out("\n"); } }
 #endif
             out("replay of frame "); outnum(frame); out(": the original made "); outnum(n_ev_int); out(" calls to game functions; now the native game runs it under comparison\n");
             rn = run_native();
             g_trace_on = 0;
             if (rn == HLE_SYNC_DIVERGED) { out("FRAME "); outnum(frame); out(": the native game's control flow differs from the original's\n"); report_divergence(g_div_idx, g_div_got, g_div_want, 0); report_stubs(); return 2; }
             if (rn >= 0 && g_ev_idx < n_ev_int) { out("FRAME "); outnum(frame); out(": the native game made fewer calls than the original\n"); report_divergence(g_ev_idx, 0, ev_int[g_ev_idx], 1); report_stubs(); return 2; }
-            if (rn >= 0) out("  the native game made exactly the same sequence of calls\n");
+            if (rn >= 0) { out("  the native game made exactly the same sequence of calls\n"); print_argmis(); }
         } else {
             rn = run_native();
             if (rn < 0) { out("native main() returned before frame "); outnum(frame); out("\n"); return 1; }
@@ -797,13 +1051,16 @@ static int main_test(void) {
         } else
         if (g_hle_native.frame_counter != hle_i.frame_counter || g_hle_native.cd_reads != hle_i.cd_reads) { out("FRAME "); outnum(frame); out(": VSync/CD counters differ\n"); return 2; }
         report_watch(frame);
+#ifdef WHERE_FRAME
+        if (frame == WHERE_FRAME) { out("the original at the VSync of frame "); outnum(frame); out(":\n"); print_orig_state(); }
+#endif
         if (frame % 25 == 0 || frame == 1) {
             out("frame "); outnum(frame); out(": RAM identical ("); outnum(ndata); out(" data ranges; original steps "); outnum((long)cpu.steps); out(", CD reads "); outnum(hle_i.cd_reads); out(", stub calls "); outnum(g_stub_calls); out(")\n");
         }
         if (hle_i.reexec) { hle_i.reexec = 0; cpu.fault = 0; cpu.pc = cpu.fault_pc; cpu.npc = cpu.pc + 4; }   /* VSync(n): the remaining blanks are the same call again */
         else { cpu.fault = 0; cpu.pc = cpu.r[31]; cpu.npc = cpu.pc + 4; }         /* the HLE'd VSync returns to its caller */
     }
-    out("== "); outnum(MAX_FRAMES); out(" frames: RAM identical at every VSync\n");
+    out("== "); outnum((long)g_frames); out(" frames: RAM identical at every VSync\n");
     report_stubs();
     return 0;
 }
@@ -814,6 +1071,8 @@ void _start(void) {
     if (!map_fixed(0x80000000u, 0x200000u)) { out("mmap of the RAM image FAILED\n"); sys3(1, 1, 0, 0); }
     map_fixed(0x1f800000u, 0x1000u);                                         /* scratchpad (the native game may use it); I/O registers stay unmapped: a touch is a crash report */
     if (!map_fixed(THREAD_STACK_WINDOW, THREAD_STACK_WINDOW_BYTES)) { out("mmap of the thread-stack window FAILED\n"); sys3(1, 1, 0, 0); }
+    if (!map_fixed(THUNK_BASE, (THUNK_BYTES + 0xfffu) & ~0xfffu)) { out("mmap of the coverage thunks FAILED\n"); sys3(1, 1, 0, 0); }
+    if (map_fixed(0u, NULL_PAGE_BYTES)) { g_null_page_mapped = 1; g_null_page_open = 1; null_page_close(); }
     install_fault_handlers();
     n = load_file("/disc/SCUS_942.21", (unsigned char*)0x8000f800u);
     build_ranges();
@@ -833,6 +1092,9 @@ void _start(void) {
     }
 #endif
     gte_reset();
+    load_run_config();
     bad = main_test();
+    report_null_sites();
+    write_coverage();
     sys3(1, bad, 0, 0);
 }

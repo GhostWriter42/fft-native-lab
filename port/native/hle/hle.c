@@ -11,6 +11,15 @@ void hle_init(hle_t* h, const hle_platform_t* p) {
     h->p = *p;
 }
 
+void hle_tick(hle_t* h) {
+    h->tick_count++;
+    if ((h->tick_count & 3u) == 0) {
+        h->frame_counter++;
+        h->hblank_quarters = 0;
+        if (h->cb_vsync) h->p.call(h->p.ctx, h->cb_vsync, 0, 0);
+    }
+}
+
 static void log_call(hle_t* h, const char* name, unsigned a0, unsigned a1, unsigned a2) {
     if (h->p.log) h->p.log(h->p.ctx, name, a0, a1, a2);
 }
@@ -44,16 +53,23 @@ static int ot_valid(hle_t* h, unsigned addr) {
  * structs (the unused upper halves of the uv words of triangles/quads, the upper byte of the extra colour words) are whatever the caller's stack
  * held, and the GPU ignores them */
 static unsigned ot_mask(unsigned code, unsigned k) {
+    unsigned m = 0xffffffffu;
     switch (code & 0xfcu) {
-    case 0x24: if (k == 7) return 0x0000ffffu; break;                                  /* POLY_FT3 */
-    case 0x2c: if (k == 7 || k == 9) return 0x0000ffffu; break;                        /* POLY_FT4 */
-    case 0x30: if (k == 3 || k == 5) return 0x00ffffffu; break;                        /* POLY_G3 */
-    case 0x34: if (k == 4 || k == 7) return 0x00ffffffu; if (k == 9) return 0x0000ffffu; break;    /* POLY_GT3 */
-    case 0x38: if (k == 3 || k == 5 || k == 7) return 0x00ffffffu; break;              /* POLY_G4 */
-    case 0x3c: if (k == 4 || k == 7 || k == 10) return 0x00ffffffu; if (k == 9 || k == 12) return 0x0000ffffu; break;   /* POLY_GT4 */
-    case 0x50: if (k == 3) return 0x00ffffffu; break;                                  /* LINE_G2 */
+    case 0x24: if (k == 7) m = 0x0000ffffu; break;                                     /* POLY_FT3 */
+    case 0x2c: if (k == 7 || k == 9) m = 0x0000ffffu; break;                           /* POLY_FT4 */
+    case 0x30: if (k == 3 || k == 5) m = 0x00ffffffu; break;                           /* POLY_G3 */
+    case 0x34: if (k == 4 || k == 7) m = 0x00ffffffu; else if (k == 9) m = 0x0000ffffu; break;    /* POLY_GT3 */
+    case 0x38: if (k == 3 || k == 5 || k == 7) m = 0x00ffffffu; break;                 /* POLY_G4 */
+    case 0x3c: if (k == 4 || k == 7 || k == 10) m = 0x00ffffffu; else if (k == 9 || k == 12) m = 0x0000ffffu; break;   /* POLY_GT4 */
+    case 0x50: if (k == 3) m = 0x00ffffffu; break;                                     /* LINE_G2 */
     }
-    return 0xffffffffu;
+    /* a textured primitive with the "raw texture" bit (command bit 0) ignores its colour: the r/g/b bytes are whatever the caller left there */
+    if ((code & 1u) && (code & 4u) && ((code & 0xe0u) == 0x20u || (code & 0xe0u) == 0x60u)) {
+        if (k == 1) m &= 0xff000000u;
+        else if ((code & 0xfcu) == 0x34u && (k == 4 || k == 7)) m = 0;
+        else if ((code & 0xfcu) == 0x3cu && (k == 4 || k == 7 || k == 10)) m = 0;
+    }
+    return m;
 }
 /* a GPU ordering table by CONTENT: every packet on the chain (its length and words), never the addresses (the two machines' stacks differ) */
 static unsigned hash_ot(hle_t* h, unsigned ot) {
@@ -95,7 +111,7 @@ static void trace_call(hle_t* h, const char* n, unsigned a0, unsigned a1, unsign
     e = &h->trace[h->trace_n++];
     e->name = n; e->a[0] = a0; e->a[1] = a1; e->a[2] = a2; e->a[3] = a3; e->a[4] = 0;
     /* the two machines' stacks differ in frame layout: a pointer to a stack local compares as "some stack address" (its contents are hashed below where they matter) */
-    { int k; for (k = 0; k < 4; k++) if (e->a[k] >= 0x801f0000u && e->a[k] < 0x80200000u) e->a[k] = 0x801f0000u; }
+    { int k; for (k = 0; k < 4; k++) if ((e->a[k] >= 0x801f0000u && e->a[k] < 0x80200000u) || (e->a[k] >= h->p.stack_lo && e->a[k] < h->p.stack_hi)) e->a[k] = 0x801f0000u; }
     if (streq(n, "SpuSetReverbModeParam") || streq(n, "SpuSetReverbDepth")) e->a[4] = fnv(h, a0, 0x14);
     else if (streq(n, "SpuSetCommonAttr")) e->a[4] = fnv(h, a0, 0x28);
     else if (streq(n, "SpuSetVoiceAttr")) e->a[4] = fnv(h, a0, 0x40);
@@ -127,10 +143,15 @@ unsigned hle_call(hle_t* h, const char* n, unsigned nargs, unsigned a0, unsigned
          * in zero time, so: n blanks); VSync(1) / VSync(-1): report, do not wait. Each blank runs the game's own vertical-blank callback. */
         int mode = (int)a0;
         unsigned frames = mode == 0 ? 1u : (mode >= 2 ? (unsigned)mode : 0u), k;
+        /* VSync(1) reads the horizontal-blank counter (scanlines since the last vertical blank); the game's AI time-slices itself on it (`VSync(1) >= 0x145`).
+         * No machine here runs in real time, so the counter is a function of the call history alone (identical on both machines): one scanline per four queries,
+         * restarted at every blank -- an AI pass gets a few hundred queries per frame instead of never (frame counter) or always (a large value). */
+        if (mode == 1) { unsigned lines = h->hblank_quarters / 4u; h->hblank_quarters++; return lines; }
         if (h->p.interp_reexec) {                                               /* one blank per execution; the driver comes back for the rest */
             if (h->vsync_left) frames = h->vsync_left;
             if (frames) {
                 h->frame_counter++;
+                h->hblank_quarters = 0;
                 if (h->cb_vsync) h->p.call(h->p.ctx, h->cb_vsync, 0, 0);
                 h->sync_reason = HLE_SYNC_VSYNC;
                 h->vsync_left = frames - 1;
@@ -141,6 +162,7 @@ unsigned hle_call(hle_t* h, const char* n, unsigned nargs, unsigned a0, unsigned
         }
         for (k = 0; k < frames; k++) {
             h->frame_counter++;
+            h->hblank_quarters = 0;
             if (h->cb_vsync) h->p.call(h->p.ctx, h->cb_vsync, 0, 0);
             h->sync_reason = HLE_SYNC_VSYNC;
             if (h->p.frame) h->p.frame(h->p.ctx);
@@ -173,10 +195,25 @@ unsigned hle_call(hle_t* h, const char* n, unsigned nargs, unsigned a0, unsigned
         if ((cmd == 0x02 || cmd == 0x15 || cmd == 0x16) && a1) {                /* CdlSetloc / SeekL / SeekP with a position (BCD minute, second, sector) */
             h->cd_lba = (bcd(h->p.r8(h->p.ctx, a1)) * 60u + bcd(h->p.r8(h->p.ctx, a1 + 1))) * 75u + bcd(h->p.r8(h->p.ctx, a1 + 2)) - 150u;
         }
+        if (cmd == 0x09 || cmd == 0x08) h->cd_streaming = 0;                    /* CdlPause / CdlStop end a CdRead2 stream */
         if (a2) h->p.w8(h->p.ctx, a2, 0x02);                                    /* status: motor on */
         log_call(h, n, a0, a1, a2);
         return 1;
     }
+    /* Raw sector streaming (libcd's CdRead2 family, used by the world map's image loader): the disc delivers one 2048-byte sector per CdGetSector, instantly. */
+    if (streq(n, "CdRead2")) { log_call(h, n, a0, a1, a2); h->cd_streaming = 1; return 1; }
+    if (streq(n, "CdReady")) { if (a1) h->p.w8(h->p.ctx, a1, 0x02); return h->cd_streaming ? 1u : 0u; }              /* CdlDataReady while streaming, else CdlNoIntr */
+    if (streq(n, "CdGetSector")) {                                              /* madr, size in words: the next sector's data */
+        unsigned char sector[2048];
+        unsigned k;
+        if (!h->cd_streaming) return 0;
+        if (!h->p.read_sector(h->p.ctx, h->cd_lba, sector)) for (k = 0; k < 2048; k++) sector[k] = 0;
+        h->p.write_bytes(h->p.ctx, a0, sector, a1 * 4u < 2048u ? a1 * 4u : 2048u);
+        h->cd_lba++;
+        return 1;
+    }
+    if (streq(n, "CdDataSync")) return 0;                                       /* the transfer is complete */
+    if (streq(n, "CdStatus")) return 0x02;                                      /* motor on, no error, shell closed */
     if (streq(n, "CdRead")) {
         log_call(h, n, a0, a1, a2);
         cd_read(h, h->cd_lba, a0, a1);

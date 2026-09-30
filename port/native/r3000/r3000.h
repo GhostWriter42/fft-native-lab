@@ -45,6 +45,10 @@ typedef struct r3k {
     int (*hle)(struct r3k* c, unsigned int addr);
     unsigned char hle_bitmap[0x200000 / 4 / 8];
     unsigned int hle_calls;
+    /* tick: function entries that are only OBSERVED (tick(c, addr) runs, then the function itself executes) -- the HLE uses them to let virtual time pass in polling loops
+     * that contain no SDK call. tick_bitmap: 1 bit per word of RAM. */
+    void (*tick)(struct r3k* c, unsigned int addr);
+    unsigned char tick_bitmap[0x200000 / 4 / 8];
     /* zero_frames: every stack frame is zero-filled when it is allocated (`addiu sp,sp,-N`), so locals the code never initialised read as 0 -- the same rule the
      * native build gets from -ftrivial-auto-var-init=zero; the retail machine has whatever an earlier call left there, which the two builds cannot share. */
     unsigned int zero_frames;
@@ -57,6 +61,8 @@ enum { R3K_OK = 0, R3K_FAULT_BAD_FETCH = 1, R3K_FAULT_UNSUPPORTED = 2, R3K_FAULT
 
 void r3k_reset(r3k_t* c, unsigned char* ram);
 void r3k_hle_add(r3k_t* c, unsigned int addr);                    /* intercept the function whose first instruction is at addr */
+void r3k_tick_add(r3k_t* c, unsigned int addr);                   /* observe (see r3k_t.tick) the entries of the function at addr */
+void r3k_tick_remove(r3k_t* c, unsigned int addr);
 /* Call the function at `addr` with up to 8 integer arguments (a0-a3 then the stack, as the o32 ABI does).
  * Returns R3K_OK if it returned to the sentinel; the result is c->r[2] (and c->r[3]). */
 int r3k_call(r3k_t* c, unsigned int addr, const unsigned int* args, int nargs, unsigned long long max_steps);

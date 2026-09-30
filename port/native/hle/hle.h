@@ -18,6 +18,7 @@ typedef struct hle_platform {
     void (*log)(void* ctx, const char* what, unsigned a0, unsigned a1, unsigned a2);   /* optional SDK call log */
     int interp_reexec;                                                          /* the machine cannot yield inside an HLE call (the interpreter): a multi-blank VSync is re-executed once per blank */
     int (*is_overlay)(void* ctx, unsigned lba);                                 /* optional: 1 if a read starting at this sector loads a CODE overlay (the driver syncs first) */
+    unsigned stack_lo, stack_hi;                                                /* optional: a second address range that counts as "the caller's stack" (the native main stack) */
     int (*valid)(void* ctx, unsigned addr);                                     /* optional: 1 if the address can be read (default: the 2 MiB of RAM); guards the walk of GPU ordering tables */
 } hle_platform_t;
 
@@ -36,8 +37,11 @@ typedef struct hle_event { unsigned desc, spec, used, enabled, ready; } hle_even
 typedef struct hle {
     hle_platform_t p;
     unsigned frame_counter;
+    unsigned tick_count;                                                        /* hle_tick() calls */
+    unsigned hblank_quarters;                                                   /* VSync(1): four queries per scanline since the last blank (see hle.c) */
     unsigned cb_vsync, cb_drawsync, cb_cd_ready, cb_cd_read, cb_spu_transfer;
     unsigned cd_lba;
+    int cd_streaming;                                                           /* CdRead2 is running: CdReady/CdGetSector deliver sectors from cd_lba on */
     unsigned cd_reads, cd_sectors;
     unsigned calls;                                                             /* HLE calls seen */
     int stop;                                                                   /* set by the frame hook to stop the machine (interpreter) */
@@ -59,6 +63,8 @@ typedef struct hle {
 enum { HLE_SYNC_NONE = 0, HLE_SYNC_VSYNC = 1, HLE_SYNC_OVERLAY = 2, HLE_SYNC_DIVERGED = 3 };
 
 void hle_init(hle_t* h, const hle_platform_t* p);
+/* One tick of virtual time (a polling function was entered): every fourth tick is a vertical blank -- the game's own callback runs, no frame sync happens. */
+void hle_tick(hle_t* h);
 /* Perform the SDK function `name` (it takes `nargs` parameters: the guest's other argument registers hold garbage and are zeroed) with the guest's first
  * four arguments; returns $v0. Unknown names are logged and return 0. */
 unsigned hle_call(hle_t* h, const char* name, unsigned nargs, unsigned a0, unsigned a1, unsigned a2, unsigned a3);
@@ -78,6 +84,11 @@ unsigned hle_call(hle_t* h, const char* name, unsigned nargs, unsigned a0, unsig
     X(battle_map_queue_textured_triangles) X(battle_map_queue_textured_quads) X(battle_map_queue_untextured_triangles) X(battle_map_queue_untextured_quads) \
     X(blit_text_glyph) X(battle_text_render_glyph_to_4bpp_image) X(world_text_blit_glyph) X(world_text_blit_font_glyph_to_4bpp) \
     X(open_movie_start_stream)
+
+/* Functions whose ENTRY lets virtual time pass (they poll a variable that the vertical-blank interrupt updates, in a loop with no SDK call): they are
+ * not replaced, only observed -- every entry calls hle_tick() on both machines (see hle.c). */
+#define HLE_TICK_NAMES(X) \
+    X(wldcore_file_poll_vram_image_stream)
 
 /* open_movie_start_stream is skipped as well: it drives the CD streaming / MDEC hardware (not modelled by the HLE yet). Without it the FMV counts as
  * instantly over (the movie-active flag it would set is never set), so the lockstep runs past the movies. */

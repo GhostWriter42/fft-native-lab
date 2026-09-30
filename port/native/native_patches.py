@@ -92,9 +92,176 @@ PATCHES = [
         why='twin of battle_unit_clear_status_staging_data (same NULL-base store into the kernel area before the first update).',
     ),
     dict(
+        file='src/battle/battle_target_calculate_tile_coords_with_cursor_glow.c',
+        old='    SVECTOR corner0;\n    SVECTOR corner1;\n    SVECTOR corner2;\n    SVECTOR corner3;\n',
+        new='    SVECTOR corner_array[4];\n',
+        why='battle_target_calculate_cursor_tile_polygon(coords, layer, SVECTOR* quad) fills quad[0..3] and is called with &corner0: it relies on the '
+            'four SVECTOR locals being adjacent in the frame (MIPS gcc 2.6.3 lays them out that way; a native compiler does not, so the writes to '
+            'quad[1..3] landed elsewhere and corner1..3 stayed empty). Lockstep replay, frame 8273 of a random-play run: battle_gfx_build_cursor_tile_glow '
+            'a3 (= &corner1) pointed at zeros natively, at {0xc4, -132, ..} in the original. The four vertices become one array (this and the two edits below).',
+    ),
+    dict(
+        file='src/battle/battle_target_calculate_tile_coords_with_cursor_glow.c',
+        old='g_battle_cursor_z, &corner0);',
+        new='g_battle_cursor_z, &corner_array[0]);',
+        why='see above',
+    ),
+    dict(
+        file='src/battle/battle_target_calculate_tile_coords_with_cursor_glow.c',
+        old='&corner0, &corner1, &corner2, &corner3, main_gfx_get_otag() + depth);',
+        new='&corner_array[0], &corner_array[1], &corner_array[2], &corner_array[3], main_gfx_get_otag() + depth);',
+        why='see above',
+    ),
+    # --- the event/status-banner "thread status indicator" drawers (six twins) read the banner thread's parameter block through a POINTER that is NULL when the
+    # --- banner thread was started without one: retail then reads console RAM at 0..0xb (the BIOS area: zero in the oracle). Natively address 0 is unmapped.
+    dict(
+        files=['src/event/attack_menu_draw_thread_status_indicators.c', 'src/event/bunit_menu_draw_thread_status_indicators.c',
+               'src/event/debugchr_menu_draw_thread_status_indicators.c', 'src/event/require_menu_draw_thread_status_indicators.c'],
+        old='    native_thread_t* thread;\n    native_thread_t* descriptor;\n',
+        new='    native_thread_t* thread;\n    native_thread_t* descriptor;\n    static native_thread_t g_low_memory_zero_thread; /* what a NULL parameter block reads as (low RAM: zero) */\n',
+        why='lockstep soak seeds 10 and 23: NATIVE CRASH reading through NULL in bunit_menu_draw_thread_status_indicators. g_battle_threads[8].function_parameter_1 is a pointer '
+            'to the banner thread\'s parameter block; when it is 0 the retail code reads console RAM at 0x0/0x4/0x8 (BIOS area, zero: `function_parameter_1 == 0`, `_2 == 0`, '
+            '`_3 & 0x80 == 0` -- a panel is requested) and draws normally. A zero stand-in object reproduces those reads.',
+    ),
+    dict(
+        files=['src/event/attack_menu_draw_thread_status_indicators.c', 'src/event/bunit_menu_draw_thread_status_indicators.c',
+               'src/event/debugchr_menu_draw_thread_status_indicators.c', 'src/event/require_menu_draw_thread_status_indicators.c'],
+        old='            thread = (native_thread_t*)g_battle_threads[8].function_parameter_1;\n',
+        new='            thread = (native_thread_t*)g_battle_threads[8].function_parameter_1;\n            if (thread == 0) {\n                thread = &g_low_memory_zero_thread;\n            }\n',
+        why='see above.',
+    ),
+    dict(
+        files=['src/event/attack_menu_draw_thread_status_indicators.c', 'src/event/bunit_menu_draw_thread_status_indicators.c',
+               'src/event/debugchr_menu_draw_thread_status_indicators.c', 'src/event/require_menu_draw_thread_status_indicators.c'],
+        old='            descriptor = (native_thread_t*)g_battle_threads[7].function_parameter_1;\n',
+        new='            descriptor = (native_thread_t*)g_battle_threads[7].function_parameter_1;\n            if (descriptor == 0) {\n                descriptor = &g_low_memory_zero_thread;\n            }\n',
+        why='see above.',
+    ),
+    dict(
+        file='src/event/equip_menu_draw_thread_status_indicators.c',
+        old='    native_thread_t* thread;\n    native_thread_t* descriptor;\n',
+        new='    native_thread_t* thread;\n    native_thread_t* descriptor;\n    static native_thread_t g_low_memory_zero_thread; /* what a NULL parameter block reads as (low RAM: zero) */\n',
+        why='EQUIP twin of the banner-thread NULL parameter block (threads 13 and 14); see attack_menu_draw_thread_status_indicators.c.',
+    ),
+    dict(
+        file='src/event/equip_menu_draw_thread_status_indicators.c',
+        old='            thread = (native_thread_t*)g_battle_threads[13].function_parameter_1;\n',
+        new='            thread = (native_thread_t*)g_battle_threads[13].function_parameter_1;\n            if (thread == 0) {\n                thread = &g_low_memory_zero_thread;\n            }\n',
+        why='see above.',
+    ),
+    dict(
+        file='src/event/equip_menu_draw_thread_status_indicators.c',
+        old='            descriptor = (native_thread_t*)g_battle_threads[14].function_parameter_1;\n',
+        new='            descriptor = (native_thread_t*)g_battle_threads[14].function_parameter_1;\n            if (descriptor == 0) {\n                descriptor = &g_low_memory_zero_thread;\n            }\n',
+        why='see above.',
+    ),
+    dict(
+        file='src/world/world_menu_draw_thread_status_indicators.c',
+        old='    native_thread_t* thread;\n    native_thread_t* descriptor;\n',
+        new='    native_thread_t* thread;\n    native_thread_t* descriptor;\n    static native_thread_t g_low_memory_zero_thread; /* what a NULL parameter block reads as (low RAM: zero) */\n',
+        why='WORLD twin of the banner-thread NULL parameter block; see attack_menu_draw_thread_status_indicators.c.',
+    ),
+    dict(
+        file='src/world/world_menu_draw_thread_status_indicators.c',
+        old='            thread = (native_thread_t*)g_world_threads[8].function_parameter_1;\n',
+        new='            thread = (native_thread_t*)g_world_threads[8].function_parameter_1;\n            if (thread == 0) {\n                thread = &g_low_memory_zero_thread;\n            }\n',
+        why='see above.',
+    ),
+    dict(
+        file='src/world/world_menu_draw_thread_status_indicators.c',
+        old='            descriptor = (native_thread_t*)g_world_threads[7].function_parameter_1;\n',
+        new='            descriptor = (native_thread_t*)g_world_threads[7].function_parameter_1;\n            if (descriptor == 0) {\n                descriptor = &g_low_memory_zero_thread;\n            }\n',
+        why='see above.',
+    ),
+    dict(
+        file='src/event/bunit_run_ability_list_menu.c',
+        old='    /* The target uses v0 from this void callee. */\n    category = ((s32 (*)(s32, s32, s32, s32))bunit_menu_update_horizontal_selection_and_mark_change)(\n        4, 0, g_bunit_menu_input_repeat_mask, 6);\n',
+        new='    /* retail: the void callee leaves the new selection in $v0 (disassembly of bunit_menu_update_horizontal_selection_and_mark_change, 0x801cc780:\n     * `sll/sra v0,v0,16` after the call to the wrapped-selection routine, untouched by the epilogue) = g_bunit_menu_selection_values[0] */\n    bunit_menu_update_horizontal_selection_and_mark_change(4, 0, g_bunit_menu_input_repeat_mask, 6);\n    category = g_bunit_menu_selection_values[0];\n',
+        why='lockstep soak seeds 23 and 37: the native `category` was garbage (6 vs 1) so the ability list was rebuilt for the wrong tab (g_main_ability_temp_list '
+            'diverged); found by the replay\'s argument comparison (bunit_create_ability_list a2 native 6, original 1).',
+    ),
+    dict(
+        file='src/event/equip_menu_update_vertical_selection_and_mark_change.c',
+        old='    /* The target leaves a2 (input_mask) unset for this three-argument callee. */\n    if (previous_selection\n        != ((s16 (*)(s32, s32))equip_menu_update_wrapped_vertical_selection)(entry_count & 0xFFFF, index)) {',
+        new='    /* retail leaves a2 alone, so the wrapped-selection routine receives this function\'s own input_mask (disassembly 0x801c970c: no write to a2 before the jal) */\n    if (previous_selection\n        != equip_menu_update_wrapped_vertical_selection(entry_count & 0xFFFF, index, input_mask)) {',
+        why='the three-argument callee reads its input mask from $a2, which the retail wrapper never touches: it is the wrapper\'s own third parameter. Natively the call '
+            'passed only two arguments and the mask was stack garbage (the d-pad selection would not respond).',
+    ),
+    dict(
+        file='src/event/equip_menu_update_horizontal_selection_and_mark_change.c',
+        old='    /* The target leaves a2 (input_mask) unset for this three-argument callee. */\n    if (previous_selection\n        != ((s16 (*)(s32, s32))equip_menu_update_wrapped_horizontal_selection)(entry_count & 0xFFFF, index)) {',
+        new='    /* retail leaves a2 alone, so the wrapped-selection routine receives this function\'s own input_mask (disassembly 0x801c9818: no write to a2 before the jal) */\n    if (previous_selection\n        != equip_menu_update_wrapped_horizontal_selection(entry_count & 0xFFFF, index, input_mask)) {',
+        why='twin of equip_menu_update_vertical_selection_and_mark_change.c.',
+    ),
+    dict(
+        file='src/event/equip_menu_run_equip_mode.c',
+        old='        /* The target uses v0 from this void callee. */\n        selected_slot = ((s32 (*)(s32, s32, s32, s8))equip_menu_update_vertical_selection_and_mark_change)(\n            5, 0, g_equip_input_secondary_repeat, 6);\n',
+        new='        /* retail: the void callee leaves the new (s16) selection in $v0 = g_equip_menu_selection_values[0] (disassembly 0x801c970c) */\n        equip_menu_update_vertical_selection_and_mark_change(5, 0, g_equip_input_secondary_repeat, 6);\n        selected_slot = g_equip_menu_selection_values[0];\n',
+        why='the caller consumes the void callee\'s leftover $v0 (the selection); natively that register is garbage.',
+    ),
+    dict(
+        file='src/event/equip_menu_run_remove_mode.c',
+        old='    /* The target uses v0 from this void callee. */\n    selection = ((s32 (*)(s32, s32, s32, s8))equip_menu_update_vertical_selection_and_mark_change)(\n        5, 1, g_equip_input_secondary_repeat, 6);\n',
+        new='    /* retail: the void callee leaves the new (s16) selection in $v0 = g_equip_menu_selection_values[1] (disassembly 0x801c970c) */\n    equip_menu_update_vertical_selection_and_mark_change(5, 1, g_equip_input_secondary_repeat, 6);\n    selection = g_equip_menu_selection_values[1];\n',
+        why='see equip_menu_run_equip_mode.c.',
+    ),
+    dict(
+        file='src/event/equip_menu_run_slot_item_browser.c',
+        old='    /* The target uses v0 from this void callee. */\n    slot = ((s32 (*)(s32, s32, s32, s8))equip_menu_update_horizontal_selection_and_mark_change)(5, 2, input, 6);\n',
+        new='    /* retail: the void callee leaves the new (s16) selection in $v0 = g_equip_menu_selection_values[2] (disassembly 0x801c9818) */\n    equip_menu_update_horizontal_selection_and_mark_change(5, 2, input, 6);\n    slot = g_equip_menu_selection_values[2];\n',
+        why='see equip_menu_run_equip_mode.c.',
+    ),
+    dict(
+        file='src/event/bunit_cmd_run_stream.c',
+        old='data = ((u8 * (*)(void)) g_bunit_cmd_handlers[data[0]])();',
+        new='data = g_bunit_cmd_handlers[data[0]](data);',
+        why='the decomp calls the opcode handler through a `(void)` cast, but the handlers take the stream pointer in $a0 (their table type is u8* (*)(u8*)). '
+            'Disassembly of bunit_cmd_run_stream (0x801c8564): a0 = data at the first `jalr v0` and `move a0,v0` after every call, so each handler receives the '
+            'current stream pointer. Natively the handler read a stale stack word (soak seeds 10, 23, 37: jump to a garbage address in the unit menu).',
+    ),
+    dict(
+        file='src/event/equip_cmd_run_stream.c',
+        old='stream = ((u8 * (*)(void)) g_equip_cmd_handlers[stream[0]])();',
+        new='stream = g_equip_cmd_handlers[stream[0]](stream);',
+        why='twin of bunit_cmd_run_stream.c (the EQUIP overlay\'s command-stream runner, handler type u8* (*)(u8*), argument left in $a0 by the retail code).',
+    ),
+    dict(
+        file='src/battle/battle_menu_run_scrolling_ability_list_thread.c',
+        old='        SetSemiTrans(&frame, 1);\n',
+        new='        /* retail: SetSemiTrans(&frame, 1) -- the address of the local POINTER: it sets bit 1 of the byte at &frame + 7, which in the MIPS frame\n'
+            '         * (sp+0xc3) is padding after `toggle`. A native frame has a live local there. No effect in retail, so no call here. */\n',
+        why='lockstep soak (seeds 4, 12, 17, 26, 30, 32): the scroll-list thread drew different arrows / crashed natively. The call passes &frame (a stack slot '
+            'holding the SPRT pointer) instead of frame; SetSemiTrans sets `code |= 2` at offset 7 of its argument, i.e. one byte past the slot. Disassembly '
+            '(0x8013a144: addiu a0,sp,188; sw s3,188(sp)): the neighbouring word at sp+192 is `toggle` (s16, sp+192..193), the byte at sp+195 is padding, so the '
+            'retail write is harmless; the native compiler puts another local there and the write corrupted it. Dropping the call is exactly equivalent.',
+    ),
+    dict(
+        file='src/event/helpmenu_run_battle_help_menu.c',
+        old='    POLY_FT4 cursor_polys[2];\n    POLY_FT4 shadow_polys[2];\n',
+        new='    POLY_FT4 poly_pool[4];\n#define cursor_polys poly_pool\n#define shadow_polys (poly_pool + 2)\n',
+        why='the function addresses its primitives as `horiz_poly[2]` (cursor_polys[2], i.e. shadow_polys[0]): it relies on the two 2-element arrays being '
+            'adjacent in the frame, as MIPS gcc 2.6.3 lays them out. A native compiler places them elsewhere, so the shadow quads kept their initial off-screen '
+            'vertices ({-512, 0}) and the writes through horiz_poly[2..] landed in other locals. Found by lockstep soak (seed 7, frame 11377: DrawOTag packet '
+            '#604 native {-512,0} x4 vs original {214,10}...). The two arrays become one pool of four.',
+    ),
+    dict(
+        file='src/event/helpmenu_menu_run_require_help.c',
+        old='    POLY_FT4 cursor_polys[2];\n    POLY_FT4 shadow_polys[2];\n',
+        new='    POLY_FT4 poly_pool[4];\n#define cursor_polys poly_pool\n#define shadow_polys (poly_pool + 2)\n',
+        why='twin of helpmenu_run_battle_help_menu.c (same adjacent-arrays assumption).',
+    ),
+    dict(
         file='src/battle/battle_map_step_init_sequence.c',
         old='        ((void (*)(void))main_sound_stop_sfx)();\n        step++;\n        battle_camera_init_defaults();',
         new='        main_sound_stop_sfx(map_id);\n        step++;\n        battle_camera_init_defaults();',
         why='same as battle_map_init_units_sprites_event_and_music.c step 0: $a0 is still the function\'s first parameter (map_id) at 0x8008eaa4.',
+    ),
+    dict(
+        file='src/wldcore/wldcore_window_build_render_record_image.c',
+        old='    *(wldcore_window_render_bounds16_t*)&g_wldcore_window_render_records[index].x\n        = *(wldcore_window_render_bounds16_t*)&position;\n',
+        new='    /* retail: one 8-byte copy out of the a1/a2 argument save slots (position then dimensions, adjacent in the MIPS frame) */\n    ((wldcore_window_render_bounds16_t*)&g_wldcore_window_render_records[index].x)->position = position;\n    ((wldcore_window_render_bounds16_t*)&g_wldcore_window_render_records[index].x)->dimensions = dimensions;\n',
+        why='the function copies the record bounds with `*(bounds16_t*)&position`, reading 8 bytes: the `position` argument and whatever lies after it. On MIPS the '
+            'a1/a2 save slots are adjacent, so that is (position, dimensions); a native frame keeps them apart (lockstep, world map frame 3839: record w/h native '
+            '0x000000b1 vs original 0x00300048, then a different LoadImage rectangle and window image). The patch copies the two arguments explicitly.',
     ),
 ]

@@ -9,6 +9,7 @@
 #      FN     (default /port/build/native/fn_names.txt: the yaml function names that RENAME turns into native_<name>)
 #      DIVFIX (non-empty: expand every idiv/div with the MIPS zero/-1 divisor semantics, port/tools/divfix.awk)
 #      EXTRA_CFLAGS (e.g. -ftrivial-auto-var-init=zero)
+#      SCOPED (directory with scoped_syms.txt / fn_docs.txt from gen_symbols.py: references to per-overlay data copies are renamed to <name>__<document>)
 DIRS=${DIRS:-"src/main src/battle"}; OUT=${OUT:-/port/build/native/all}
 FN=${FN:-/port/build/native/fn_names.txt}
 LDFILE=${LDFILE:-/port/build/native/symbols.ld}
@@ -22,7 +23,7 @@ if [ -f /port/native/replacements/replaced.txt ]; then
   grep -vxFf /port/native/replacements/replaced.txt "$OUT/sources.txt" > "$OUT/sources.filtered" && mv "$OUT/sources.filtered" "$OUT/sources.txt"
 fi
 echo "sources: $(wc -l < "$OUT/sources.txt")"
-export CF OUT FN RENAME DIVFIX
+export CF OUT FN RENAME DIVFIX SCOPED
 cat "$OUT/sources.txt" | xargs -P 18 -I{} sh -c '
   o="$OUT/o/$(echo {} | tr / _).o"
   if [ -n "$DIVFIX" ]; then
@@ -36,6 +37,15 @@ cat "$OUT/sources.txt" | xargs -P 18 -I{} sh -c '
       nm --defined-only -g "$o" | awk "{print \$3}" | grep -Fxf "$FN" | awk "{print \$1\" native_\"\$1}" > "$o.map"
       [ -s "$o.map" ] && objcopy --redefine-syms="$o.map" "$o"
       rm -f "$o.map"
+      # data symbols that overlay documents define at different addresses: the references in the object of a function go to the copy of the document of that function (gen_symbols.py)
+      if [ -n "$SCOPED" ] && [ -s "$SCOPED/fn_docs.txt" ]; then
+        doc=$(awk -v f="$(basename {} .c)" "\$1==f{print \$2; exit}" "$SCOPED/fn_docs.txt")
+        if [ -n "$doc" ]; then
+          nm -u "$o" | awk "{print \$2}" | grep -Fxf "$SCOPED/scoped_syms.txt" | awk -v d="$doc" "{print \$1\" \"\$1\"__\"d}" > "$o.smap"
+          [ -s "$o.smap" ] && objcopy --redefine-syms="$o.smap" "$o"
+          rm -f "$o.smap"
+        fi
+      fi
     fi
   else
     echo {} >> "$OUT/failed.txt"; rm -f "$o"

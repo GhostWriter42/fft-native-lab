@@ -21,6 +21,7 @@ def macro_names(macro):
     return set(re.findall(r'X\((\w+)\)', m.group(1))) if m else set()
 explicit = macro_names('HLE_EXPLICIT_NAMES')
 skip = macro_names('HLE_SKIP_NAMES')
+tick = macro_names('HLE_TICK_NAMES')
 hooked_libs = ('libspu', 'libetc', 'libcd', 'libcard', 'libpress')
 # libraries that are replaced natively (software GTE): the HLE calls the ORIGINAL code makes from inside them (critical sections, FlushCache ...) have no native counterpart, so the
 # interpreter side does not log them (the calls a natively compiled SDK makes are logged on both sides)
@@ -52,6 +53,7 @@ def arity(name):
     return 4
 
 per_module = []                                  # (module name, [names])
+per_module_ticks = []                            # (module name, [names]): observed, not replaced
 all_names = []
 for m in mods:
     y = repo / 'target' / m
@@ -75,6 +77,7 @@ for m in mods:
             if (any(lo <= addr < hi for lo, hi in ranges) or name in explicit or name in skip) and name not in names:
                 names.append(name)
         per_module.append((stem, names))
+        per_module_ticks.append((stem, [name for addr, size, name, asm in yamlfuncs.parse_lines(doc_lines) if name in tick]))
         for n in names:
             if n not in all_names:
                 all_names.append(n)
@@ -95,7 +98,15 @@ for stem, names in per_module:
     lines.append(f'    {{ "{stem}", g_hle_names_{stem}, {len(names)}, g_hle_arity_{stem} }},')
 lines.append('    { 0, 0, 0, 0 }\n};')
 lines.append(f'const int g_hle_module_name_count = {len(per_module)};')
+for stem, names in per_module_ticks:
+    lines.append(f'static const char* const g_hle_ticks_{stem}[] = {{ ' + ''.join(f'"{n}", ' for n in names) + '0 };')
+lines.append('struct hle_module_ticks { const char* module; const char* const* names; };')
+lines.append('const struct hle_module_ticks g_hle_module_ticks[] = {')
+for stem, names in per_module_ticks:
+    lines.append(f'    {{ "{stem}", g_hle_ticks_{stem} }},')
+lines.append('    { 0, 0 }\n};')
 lines.append('const unsigned g_hle_untraced[] = { ' + ''.join(f'0x{lo:08x}u, 0x{hi:08x}u, ' for lo, hi in untraced) + '0, 0 };')
 out.write_bytes(('\n'.join(lines) + '\n').encode())
 (out.with_name('hle_natives.txt')).write_bytes(('\n'.join('native_' + n for n in all_names) + '\n').encode())
-print(f'{len(all_names)} functions taken over by the HLE ({", ".join(s + ":" + str(len(n)) for s, n in per_module)}) -> {out}')
+listing = [s + ':' + str(len(n)) for s, n in per_module if n]
+print(f'{len(all_names)} functions taken over by the HLE ({", ".join(listing)}) -> {out}')
