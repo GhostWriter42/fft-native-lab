@@ -11,6 +11,9 @@ static int imin(int a, int b) { return a < b ? a : b; }
 static int imax(int a, int b) { return a > b ? a : b; }
 static int sx11(unsigned v) { return (int)(v & 0x7ffu) - (int)((v & 0x400u) << 1); }       /* 11-bit two's complement */
 
+static unsigned g_op_a0, g_op_a1;                                               /* the arguments of the SDK call in progress (for the pixel watch) */
+static const char* g_op = "?";                                                  /* what the GPU is doing (for the pixel watch) */
+#define WATCH(g, x, y, v) do { if ((g)->watch_on && (((x) & 1023) == (g)->watch_x) && (((y) & 511) == (g)->watch_y)) { unsigned wi = (g)->wlog_n++ & 15u; (g)->wlog_op[wi] = g_op; (g)->wlog_a0[wi] = g_op_a0; (g)->wlog_a1[wi] = g_op_a1; (g)->wlog_frame[wi] = (g)->cur_frame; (g)->wlog_env[wi][0] = (unsigned)(g)->ofs_x; (g)->wlog_env[wi][1] = (unsigned)(g)->ofs_y; (g)->wlog_env[wi][2] = (unsigned)((g)->clip_x1 | ((g)->clip_x2 << 16)); (g)->wlog_env[wi][3] = (unsigned)((g)->clip_y1 | ((g)->clip_y2 << 16)); (g)->wlog_val[wi] = (unsigned)(v); } } while (0)
 void gpu_reset(gpu_t* g) {
     g->clip_x1 = 0; g->clip_y1 = 0; g->clip_x2 = GPU_VRAM_W - 1; g->clip_y2 = GPU_VRAM_H - 1;
     g->ofs_x = g->ofs_y = 0;
@@ -39,6 +42,9 @@ static void put_pixel(gpu_t* g, int x, int y, unsigned col, int semi) {
     if (g->mask_check && (*p & 0x8000u)) return;
     if (semi) col = blend(*p, col, g->abr);
     *p = (unsigned short)((col & 0x7fffu) | (g->mask_set ? 0x8000u : 0));
+    g->rd[(y & 511) * GPU_VRAM_W + (x & 1023)] = 0;
+    g->n_px++;
+    WATCH(g, x, y, *p);
 }
 static unsigned rgb555(unsigned r, unsigned g, unsigned b) { return (r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10); }
 
@@ -48,20 +54,26 @@ static unsigned fetch(gpu_t* g, int u, int v, int clut_x, int clut_y) {
     u &= 255; v &= 255;
     u = (u & ~(g->twin_mx * 8)) | ((g->twin_ox & g->twin_mx) * 8);
     v = (v & ~(g->twin_my * 8)) | ((g->twin_oy & g->twin_my) * 8);
+#ifdef GPU_TEST_HOOK
+    GPU_TEST_HOOK(u, v);
+#endif
     {
         int row = (g->tp_y * 256 + v) & 511, bx = g->tp_x * 64;
         const unsigned short* line = &g->vram[row * GPU_VRAM_W];
         const unsigned short* clut = &g->vram[(clut_y & 511) * GPU_VRAM_W];
+        unsigned char* rline = &g->rd[row * GPU_VRAM_W];
+        unsigned char* rclut = &g->rd[(clut_y & 511) * GPU_VRAM_W];
         switch (g->tp) {
-        case 0: word = line[(bx + (u >> 2)) & 1023]; idx = (word >> ((u & 3) * 4)) & 15u; return clut[(clut_x * 16 + (int)idx) & 1023];
-        case 1: word = line[(bx + (u >> 1)) & 1023]; idx = (word >> ((u & 1) * 8)) & 255u; return clut[(clut_x * 16 + (int)idx) & 1023];
-        default: return line[(bx + u) & 1023];
+        case 0: { int tx = (bx + (u >> 2)) & 1023, cx; word = line[tx]; rline[tx] = 1; idx = (word >> ((u & 3) * 4)) & 15u; cx = (clut_x * 16 + (int)idx) & 1023; rclut[cx] = 1; return clut[cx]; }
+        case 1: { int tx = (bx + (u >> 1)) & 1023, cx; word = line[tx]; rline[tx] = 1; idx = (word >> ((u & 1) * 8)) & 255u; cx = (clut_x * 16 + (int)idx) & 1023; rclut[cx] = 1; return clut[cx]; }
+        default: { int tx = (bx + u) & 1023; rline[tx] = 1; return line[tx]; }
         }
     }
 }
 /* a textured pixel: modulate the texel with the vertex colour (128 = neutral) unless the primitive is "raw", then draw it (semi-transparent if the primitive asks for it and the texel's STP bit is set) */
 static void textured_pixel(gpu_t* g, int x, int y, unsigned texel, int cr, int cg, int cb, int raw, int semi) {
     unsigned col;
+    g->n_tex_px[g->tp]++;
     if (texel == 0) return;
     if (raw) col = texel & 0x7fffu;
     else {
@@ -129,7 +141,7 @@ static void draw_line(gpu_t* g, vtx_t a, vtx_t b, int shaded, int semi) {
 static void fill_rect(gpu_t* g, unsigned xy, unsigned wh, unsigned color24) {                                    /* GP0(02h): ignores the drawing area */
     int x = (int)(xy & 0x3f0u), y = (int)((xy >> 16) & 0x1ffu), w = (int)(((wh & 0x3ffu) + 0xfu) & ~0xfu), h = (int)((wh >> 16) & 0x1ffu), xx, yy;
     unsigned col = rgb555(color24 & 255u, (color24 >> 8) & 255u, (color24 >> 16) & 255u);
-    for (yy = 0; yy < h; yy++) for (xx = 0; xx < w; xx++) g->vram[((y + yy) & 511) * GPU_VRAM_W + ((x + xx) & 1023)] = (unsigned short)col;
+    for (yy = 0; yy < h; yy++) for (xx = 0; xx < w; xx++) { g->vram[((y + yy) & 511) * GPU_VRAM_W + ((x + xx) & 1023)] = (unsigned short)col; g->rd[((y + yy) & 511) * GPU_VRAM_W + ((x + xx) & 1023)] = 0; WATCH(g, x + xx, y + yy, col); }
 }
 
 /* ------------------------------------------------------------------------------------------------ GP0 command stream */
@@ -137,6 +149,7 @@ static void set_tpage(gpu_t* g, unsigned v) { g->tp_x = (int)(v & 15); g->tp_y =
 /* one command of the stream w[0..n-1] (n words are available); returns the number of words it used (at least 1) */
 static unsigned gp0_command(gpu_t* g, const unsigned* w, unsigned n) {
     unsigned cmd = w[0] >> 24, code = cmd & 0xe0u, used = 1;
+    g->n_cmd[cmd]++;
     if (code == 0x20) {                                                         /* polygon */
         int quad = (cmd >> 3) & 1, textured = (cmd >> 2) & 1, shaded = (cmd >> 4) & 1, semi = (cmd >> 1) & 1, raw = cmd & 1, nv = quad ? 4 : 3, i, clut_x = 0, clut_y = 0;
         vtx_t v[4];
@@ -157,7 +170,17 @@ static unsigned gp0_command(gpu_t* g, const unsigned* w, unsigned n) {
             }
         }
         used = k;
+        if (g->dbg_on && g->dbg_n < 64) {
+            int miny = v[0].y, maxy = v[0].y, minx = v[0].x, maxx = v[0].x;
+            for (i = 1; i < nv; i++) { if (v[i].y < miny) miny = v[i].y; if (v[i].y > maxy) maxy = v[i].y; if (v[i].x < minx) minx = v[i].x; if (v[i].x > maxx) maxx = v[i].x; }
+            if (maxy - miny > 14 && maxx - minx < 10) {                        /* thin and tall: the stripes */
+                unsigned q = g->dbg_n++;
+                for (i = 0; i < nv; i++) { g->dbg[q].x[i] = v[i].x; g->dbg[q].y[i] = v[i].y; g->dbg[q].u[i] = v[i].u; g->dbg[q].v[i] = v[i].v; g->dbg[q].r[i] = v[i].r; g->dbg[q].g[i] = v[i].g; g->dbg[q].b[i] = v[i].b; }
+                g->dbg[q].cmd = cmd; g->dbg[q].clut_x = (unsigned)clut_x; g->dbg[q].clut_y = (unsigned)clut_y; g->dbg[q].tp_x = (unsigned)g->tp_x; g->dbg[q].tp_y = (unsigned)g->tp_y; g->dbg[q].tp = (unsigned)g->tp; g->dbg[q].twin[0] = (unsigned)g->twin_mx; g->dbg[q].twin[1] = (unsigned)g->twin_my; g->dbg[q].twin[2] = (unsigned)g->twin_ox; g->dbg[q].twin[3] = (unsigned)g->twin_oy;
+            }
+        }
         g->n_prims++; g->n_tris += quad ? 2u : 1u;
+        for (i = 0; i < (int)g->n_skip; i++) if (g->skip_cmd[i] == cmd) return used;
         raster_tri(g, v[0], v[1], v[2], textured, shaded, semi, raw, clut_x, clut_y);
         if (quad) raster_tri(g, v[1], v[2], v[3], textured, shaded, semi, raw, clut_x, clut_y);
         return used;
@@ -205,7 +228,10 @@ static unsigned gp0_command(gpu_t* g, const unsigned* w, unsigned n) {
         if (n >= 4) {
             int sx = (int)(w[1] & 0x3ffu), sy = (int)((w[1] >> 16) & 0x1ffu), dx = (int)(w[2] & 0x3ffu), dy = (int)((w[2] >> 16) & 0x1ffu), ww = (int)(w[3] & 0x3ffu), hh = (int)((w[3] >> 16) & 0x1ffu), xx, yy;
             if (!ww) ww = 1024; if (!hh) hh = 512;
-            for (yy = 0; yy < hh; yy++) for (xx = 0; xx < ww; xx++) g->vram[((dy + yy) & 511) * GPU_VRAM_W + ((dx + xx) & 1023)] = g->vram[((sy + yy) & 511) * GPU_VRAM_W + ((sx + xx) & 1023)];
+            for (yy = 0; yy < hh; yy++) for (xx = 0; xx < ww; xx++) {
+                g->vram[((dy + yy) & 511) * GPU_VRAM_W + ((dx + xx) & 1023)] = g->vram[((sy + yy) & 511) * GPU_VRAM_W + ((sx + xx) & 1023)];
+                g->rd[((dy + yy) & 511) * GPU_VRAM_W + ((dx + xx) & 1023)] = g->rd[((sy + yy) & 511) * GPU_VRAM_W + ((sx + xx) & 1023)];      /* data movement: the copy is as "read" as its source */
+            }
             return 4;
         }
         return n;
@@ -214,8 +240,8 @@ static unsigned gp0_command(gpu_t* g, const unsigned* w, unsigned n) {
     case 0xc0: return n >= 3 ? 3 : n;
     case 0xe1: set_tpage(g, w[0] & 0x7ffu); return 1;
     case 0xe2: g->twin_mx = (int)(w[0] & 31u); g->twin_my = (int)((w[0] >> 5) & 31u); g->twin_ox = (int)((w[0] >> 10) & 31u); g->twin_oy = (int)((w[0] >> 15) & 31u); return 1;
-    case 0xe3: g->clip_x1 = (int)(w[0] & 0x3ffu); g->clip_y1 = (int)((w[0] >> 10) & 0x3ffu); if (g->clip_y1 > 511) g->clip_y1 = 511; return 1;
-    case 0xe4: g->clip_x2 = (int)(w[0] & 0x3ffu); g->clip_y2 = (int)((w[0] >> 10) & 0x3ffu); if (g->clip_y2 > 511) g->clip_y2 = 511; return 1;
+    case 0xe3: g->clip_x1 = (int)(w[0] & 0x3ffu); g->clip_y1 = (int)((w[0] >> 10) & 0x1ffu); return 1;
+    case 0xe4: g->clip_x2 = (int)(w[0] & 0x3ffu); g->clip_y2 = (int)((w[0] >> 10) & 0x1ffu); return 1;
     case 0xe5: g->ofs_x = sx11(w[0] & 0x7ffu); g->ofs_y = sx11((w[0] >> 11) & 0x7ffu); return 1;
     case 0xe6: g->mask_set = (int)(w[0] & 1u); g->mask_check = (int)((w[0] >> 1) & 1u); return 1;
     default: g->n_unknown++; return 1;
@@ -247,7 +273,12 @@ static void load_image(hle_t* h, unsigned rect, unsigned data) {
     int x = rd16s(h, rect), y = rd16s(h, rect + 2), w = rd16s(h, rect + 4), hh = rd16s(h, rect + 6), xx, yy;
     unsigned a = data;
     for (yy = 0; yy < hh; yy++)
-        for (xx = 0; xx < w; xx++, a += 2) g->vram[((y + yy) & 511) * GPU_VRAM_W + ((x + xx) & 1023)] = (unsigned short)(h->p.r8(h->p.ctx, a) | (h->p.r8(h->p.ctx, a + 1) << 8));
+        for (xx = 0; xx < w; xx++, a += 2) {
+            unsigned short c = (unsigned short)(h->p.r8(h->p.ctx, a) | (h->p.r8(h->p.ctx, a + 1) << 8));
+            g->vram[((y + yy) & 511) * GPU_VRAM_W + ((x + xx) & 1023)] = c;
+            g->rd[((y + yy) & 511) * GPU_VRAM_W + ((x + xx) & 1023)] = 0;
+            WATCH(g, x + xx, y + yy, c);
+        }
 }
 static void store_image(hle_t* h, unsigned rect, unsigned data) {
     gpu_t* g = h->gpu;
@@ -257,6 +288,7 @@ static void store_image(hle_t* h, unsigned rect, unsigned data) {
         for (xx = 0; xx < w; xx++, a += 2) {
             unsigned short c = g->vram[((y + yy) & 511) * GPU_VRAM_W + ((x + xx) & 1023)];
             unsigned char b[2];
+            g->rd[((y + yy) & 511) * GPU_VRAM_W + ((x + xx) & 1023)] = 1;                  /* the data reaches RAM, which is compared */
             b[0] = (unsigned char)(c & 255u); b[1] = (unsigned char)(c >> 8);
             h->p.write_bytes(h->p.ctx, a, b, 2);
         }
@@ -265,30 +297,38 @@ int gpu_hle_call(hle_t* h, const char* n, unsigned a0, unsigned a1, unsigned a2,
     gpu_t* g = h->gpu;
     (void)a3;
     *ret = 0;
-    if (streq(n, "DrawOTag")) { draw_otag(h, a0); return 1; }
-    if (streq(n, "DrawPrim")) { unsigned tag = rd32(h, a0); if (tag >> 24) gp0_packet(h, a0, tag >> 24); return 1; }
-    if (streq(n, "LoadImage")) { load_image(h, a0, a1); return 1; }
-    if (streq(n, "StoreImage")) { store_image(h, a0, a1); return 1; }
+    if (streq(n, "DrawOTag")) { g_op = "DrawOTag"; g_op_a0 = a0; g_op_a1 = 0; draw_otag(h, a0); return 1; }
+    if (streq(n, "DrawPrim")) { unsigned tag = rd32(h, a0); g_op = "DrawPrim"; if (tag >> 24) gp0_packet(h, a0, tag >> 24); return 1; }
+    if (streq(n, "LoadImage")) { g->n_loadimage++; g_op = "LoadImage"; g_op_a0 = a0; g_op_a1 = a1; load_image(h, a0, a1); return 1; }
+    if (streq(n, "StoreImage")) { g->n_storeimage++; store_image(h, a0, a1); return 1; }
     if (streq(n, "MoveImage")) {
         int sx = rd16s(h, a0), sy = rd16s(h, a0 + 2), w = rd16s(h, a0 + 4), hh = rd16s(h, a0 + 6), xx, yy;
         unsigned short tmp[64];
         (void)tmp;
-        for (yy = 0; yy < hh; yy++) for (xx = 0; xx < w; xx++) g->vram[(((int)a2 + yy) & 511) * GPU_VRAM_W + (((int)a1 + xx) & 1023)] = g->vram[((sy + yy) & 511) * GPU_VRAM_W + ((sx + xx) & 1023)];
+        g_op = "MoveImage"; g->n_moveimage++;
+        for (yy = 0; yy < hh; yy++) for (xx = 0; xx < w; xx++) { g->vram[(((int)a2 + yy) & 511) * GPU_VRAM_W + (((int)a1 + xx) & 1023)] = g->vram[((sy + yy) & 511) * GPU_VRAM_W + ((sx + xx) & 1023)]; g->rd[(((int)a2 + yy) & 511) * GPU_VRAM_W + (((int)a1 + xx) & 1023)] = g->rd[((sy + yy) & 511) * GPU_VRAM_W + ((sx + xx) & 1023)]; WATCH(g, (int)a1 + xx, (int)a2 + yy, g->vram[(((int)a2 + yy) & 511) * GPU_VRAM_W + (((int)a1 + xx) & 1023)]); }
         return 1;
     }
-    if (streq(n, "ClearImage")) { fill_rect(g, (unsigned)(rd16s(h, a0) & 0xffff) | ((unsigned)rd16s(h, a0 + 2) << 16), (unsigned)(rd16s(h, a0 + 4) & 0xffff) | ((unsigned)rd16s(h, a0 + 6) << 16), (a1 & 255u) | ((a2 & 255u) << 8) | ((a3 & 255u) << 16)); return 1; }
+    if (streq(n, "ClearImage")) { g->n_clearimage++; g_op = "ClearImage"; fill_rect(g, (unsigned)(rd16s(h, a0) & 0xffff) | ((unsigned)rd16s(h, a0 + 2) << 16), (unsigned)(rd16s(h, a0 + 4) & 0xffff) | ((unsigned)rd16s(h, a0 + 6) << 16), (a1 & 255u) | ((a2 & 255u) << 8) | ((a3 & 255u) << 16)); return 1; }
     if (streq(n, "PutDispEnv")) {
         g->disp_x = rd16s(h, a0); g->disp_y = rd16s(h, a0 + 2); g->disp_w = rd16s(h, a0 + 4); g->disp_h = rd16s(h, a0 + 6);
+        { unsigned q = g->n_disp++ & 7u; g->disp_hist[q][0] = g->disp_x; g->disp_hist[q][1] = g->disp_y; g->disp_hist[q][2] = g->disp_w; g->disp_hist[q][3] = g->disp_h; }
         g->disp_rgb24 = h->p.r8(h->p.ctx, a0 + 17) & 1;
         return 1;
     }
     if (streq(n, "PutDrawEnv")) {                                               /* DRAWENV: clip, ofs, tw, tpage, dtd, dfe, isbg, r0 g0 b0 */
         int cx = rd16s(h, a0), cy = rd16s(h, a0 + 2), cw = rd16s(h, a0 + 4), ch = rd16s(h, a0 + 6), twx = rd16s(h, a0 + 12), twy = rd16s(h, a0 + 14), tww = rd16s(h, a0 + 16), twh = rd16s(h, a0 + 18);
-        g->clip_x1 = cx; g->clip_y1 = cy; g->clip_x2 = cx + cw - 1; g->clip_y2 = cy + ch - 1;
+        /* libgpu's SetDrawEnv (get_cs / get_ce) CLAMPS the clip corners to the VRAM: the game's deployment screens ask for a clip at x = -128, which becomes 0 -- a wrapped
+         * or masked -128 would send every pixel at negative coordinates into the texture pages at the right edge of the VRAM */
+        g->clip_x1 = cx < 0 ? 0 : (cx > 1023 ? 1023 : cx); g->clip_y1 = cy < 0 ? 0 : (cy > 511 ? 511 : cy);
+        g->clip_x2 = cx + cw - 1 < 0 ? 0 : (cx + cw - 1 > 1023 ? 1023 : cx + cw - 1); g->clip_y2 = cy + ch - 1 < 0 ? 0 : (cy + ch - 1 > 511 ? 511 : cy + ch - 1);
         g->ofs_x = rd16s(h, a0 + 8); g->ofs_y = rd16s(h, a0 + 10);
+        { unsigned q = g->n_env++ & 7u; g->env_hist[q][0] = cx; g->env_hist[q][1] = cy; g->env_hist[q][2] = cw; g->env_hist[q][3] = ch; g->env_hist[q][4] = g->ofs_x; g->env_hist[q][5] = g->ofs_y;
+          g->env_hist[q][6] = (int)(h->p.r8(h->p.ctx, a0 + 20) | (h->p.r8(h->p.ctx, a0 + 21) << 8)); g->env_hist[q][7] = (int)h->p.r8(h->p.ctx, a0 + 24); g->env_hist[q][8] = (int)g->cur_frame; }
         if (tww || twh) { g->twin_mx = ((-tww) & 0xff) >> 3; g->twin_my = ((-twh) & 0xff) >> 3; g->twin_ox = twx >> 3; g->twin_oy = twy >> 3; }
         else g->twin_mx = g->twin_my = g->twin_ox = g->twin_oy = 0;
         set_tpage(g, (unsigned)(h->p.r8(h->p.ctx, a0 + 20) | (h->p.r8(h->p.ctx, a0 + 21) << 8)) & 0x1ffu);
+        g_op = "PutDrawEnv";
         if (h->p.r8(h->p.ctx, a0 + 24)) {                                       /* isbg: clear the clip area (ignores the offset) */
             unsigned col = h->p.r8(h->p.ctx, a0 + 25) | (h->p.r8(h->p.ctx, a0 + 26) << 8) | (h->p.r8(h->p.ctx, a0 + 27) << 16);
             fill_rect(g, (unsigned)(cx & 0xffff) | ((unsigned)cy << 16), (unsigned)(cw & 0xffff) | ((unsigned)ch << 16), col);
@@ -322,4 +362,23 @@ unsigned gpu_hash_display(const gpu_t* g) {
     int xx, y;
     for (y = 0; y < g->disp_h; y++) for (xx = 0; xx < g->disp_w; xx++) x = (x ^ g->vram[((g->disp_y + y) & 511) * GPU_VRAM_W + ((g->disp_x + xx) & 1023)]) * 16777619u;
     return x;
+}
+
+void gpu_texpage_rgb(const gpu_t* g, int tp_x, int tp_y, int mode, int clut_x, int clut_y, unsigned char* out) {
+    int u, v;
+    for (v = 0; v < 256; v++)
+        for (u = 0; u < 256; u++) {
+            const unsigned short* line = &g->vram[((tp_y * 256 + v) & 511) * GPU_VRAM_W];
+            const unsigned short* clut = &g->vram[(clut_y & 511) * GPU_VRAM_W];
+            int bx = tp_x * 64;
+            unsigned c;
+            if (mode == 0) c = clut[(clut_x * 16 + (int)((line[(bx + (u >> 2)) & 1023] >> ((u & 3) * 4)) & 15u)) & 1023];
+            else if (mode == 1) c = clut[(clut_x * 16 + (int)((line[(bx + (u >> 1)) & 1023] >> ((u & 1) * 8)) & 255u)) & 1023];
+            else c = line[(bx + u) & 1023];
+            {
+                unsigned r = c & 31, gg = (c >> 5) & 31, b = (c >> 10) & 31;
+                unsigned char* p = out + 3 * (v * 256 + u);
+                p[0] = (unsigned char)((r << 3) | (r >> 2)); p[1] = (unsigned char)((gg << 3) | (gg >> 2)); p[2] = (unsigned char)((b << 3) | (b >> 2));
+            }
+        }
 }

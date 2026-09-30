@@ -225,6 +225,7 @@ static int module_active(const char* name) {
     return 0;
 }
 extern char g_battle_menu_active_turn_banner[];
+extern char g_helpmenu_active_banner[];                         /* the HELPMENU overlay's saved copy of the banner (battle_action_copy_at_and_cursor_to snapshots it whole) */
 extern char g_battle_effect_list_nodes[];
 /* struct padding that records copy along with the fields (stale stack bytes on retail, zero natively): {array, element size, element count, offset, length} */
 static unsigned ignored_padding_mask(unsigned a) {
@@ -249,7 +250,7 @@ static unsigned ignored_bits(unsigned a) {
     if (m) return m;
     /* battle_menu_display_projected_action_effect stores its local `value` into banner.projected_display_value (+0x1e) on every path, also when no branch assigned it (an action without
      * attack type): retail stores whatever its registers held (0x01c0 ...), natively it is zero. The value is drawn only together with an image, which that path does not choose. */
-    if (a == (unsigned)g_battle_menu_active_turn_banner + 0x1c) return 0xffff0000u;
+    if (a == (unsigned)g_battle_menu_active_turn_banner + 0x1c || a == (unsigned)g_helpmenu_active_banner + 0x1c) return 0xffff0000u;
     return 0;
 }
 static int ignored_word(unsigned a) {
@@ -398,7 +399,10 @@ static unsigned g_natwatch, g_natwatch_from = 1, g_natwatch_logged, g_natwatch_s
 /* The software GPU (run.cfg "gpu 1"): each machine renders its drawing calls into its own VRAM; the two VRAMs are compared at every frame, and "shot F" / "shotevery N" write the
  * display area of both machines as PNG files to /shots (shotscale 1..3 magnifies them for viewing). */
 static gpu_t g_gpu_orig, g_gpu_native;
-static int g_gpu_on, g_shotscale = 1;
+static int g_gpu_on, g_shotscale = 1, g_gpu_watch, g_gpu_watch_x, g_gpu_watch_y;
+static unsigned g_texdump[6], g_texdump_n;                                      /* run.cfg "texdump FRAME TPX TPY MODE CLUTX CLUTY": write that texture page, decoded, as /shots/tex<frame>.png */
+static unsigned g_skipcmd[4], g_nskipcmd;                                       /* run.cfg "skipcmd 0x26": do not draw polygons with that command byte (rasteriser debugging) */
+static unsigned g_polydump;                                                     /* run.cfg "polydump FRAME": print the tall textured polygons of that frame (debugging the rasteriser) */
 static unsigned g_shot_list[256], g_shot_every, g_shot_from = 1, g_shot_count;
 static int g_nshot_list;
 static unsigned g_crc_table[256];
@@ -480,9 +484,13 @@ static void load_run_config(void) {
     buf[n] = 0;
     while (*p) {
         if (p[0] == 'f' && p[1] == 'r') { p += 6; g_frames = parse_num(&p); }                 /* frames N */
-        else if (p[0] == 'p' && p[1] == 'o') {                                                 /* pokewhen CADDR CVAL ADDR VAL */
+        else if (p[0] == 'p' && p[1] == 'o' && p[2] == 'k') {                                     /* pokewhen CADDR CVAL ADDR VAL */
             if (g_npokes < 64) { p += 9; g_pokes[g_npokes].caddr = parse_num(&p); g_pokes[g_npokes].cval = parse_num(&p); g_pokes[g_npokes].addr = parse_num(&p); g_pokes[g_npokes].val = parse_num(&p); g_pokes[g_npokes].repeat = parse_num(&p); g_pokes[g_npokes].done = 0; g_npokes++; }
         }
+        else if (p[0] == 's' && p[1] == 'k') { p += 7; if (g_nskipcmd < 4) g_skipcmd[g_nskipcmd++] = parse_num(&p); }                 /* skipcmd 0x26 */
+        else if (p[0] == 't' && p[1] == 'e' && p[2] == 'x') { int q; p += 7; for (q = 0; q < 6; q++) g_texdump[q] = parse_num(&p); g_texdump_n = 1; }      /* texdump FRAME TPX TPY MODE CLUTX CLUTY */
+        else if (p[0] == 'p' && p[1] == 'o' && p[4] == 'd') { p += 8; g_polydump = parse_num(&p); }                              /* polydump FRAME */
+        else if (p[0] == 'g' && p[1] == 'p' && p[3] == 'w') { p += 8; g_gpu_watch_x = (int)parse_num(&p); g_gpu_watch_y = (int)parse_num(&p); g_gpu_watch = 1; }   /* gpuwatch X Y */
         else if (p[0] == 'g' && p[1] == 'p') { p += 3; g_gpu_on = (int)parse_num(&p); }                                            /* gpu 1 */
         else if (p[0] == 's' && p[1] == 'h' && p[4] == ' ') { p += 4; if (g_nshot_list < 256) g_shot_list[g_nshot_list++] = parse_num(&p); }           /* shot FRAME */
         else if (p[0] == 's' && p[1] == 'h' && p[4] == 'e') { p += 9; g_shot_every = parse_num(&p); g_shot_from = parse_num(&p); if (!g_shot_from) g_shot_from = 1; }   /* shotevery N [FROM] */
@@ -1110,22 +1118,78 @@ static void write_shot(const gpu_t* g, const char* tag, int frame) {
     shot_path(path, tag, frame);
     if (!png_write(path, rgb, w, h, g_shotscale)) { out("  could not write "); out(path); out("\n"); }
 }
+/* the last (up to 16) writes to the watched VRAM pixel of one machine, oldest first: frame, the SDK call that wrote it with its first two arguments, the value */
+static void print_wlog(const gpu_t* g, const char* who) {
+    unsigned n = g->wlog_n, q, from = n > 16 ? n - 16 : 0;
+    out("  watched pixel ("); outnum(g_gpu_watch_x); out(", "); outnum(g_gpu_watch_y); out("), "); out(who); out(": "); outnum(n); out(" writes; last:");
+    for (q = from; q < n; q++) { unsigned wi = q & 15u; out(" [f"); outnum(g->wlog_frame[wi]); out(" "); out(g->wlog_op[wi]); out("(0x"); outhex(g->wlog_a0[wi]); out(",0x"); outhex(g->wlog_a1[wi]); out(")=0x"); outhex(g->wlog_val[wi]); out(" ofs "); outnum((int)g->wlog_env[wi][0]); out(","); outnum((int)g->wlog_env[wi][1]); out(" clipx "); outnum((int)(g->wlog_env[wi][2] & 0xffff)); out(".."); outnum((int)(g->wlog_env[wi][2] >> 16)); out(" clipy "); outnum((int)(g->wlog_env[wi][3] & 0xffff)); out(".."); outnum((int)(g->wlog_env[wi][3] >> 16)); out("]"); }
+    out("\n");
+}
 static int gpu_check_frame(int frame) {
     unsigned hn, ho, i, n = 0, first = 0xffffffffu;
     int want = 0, k;
     if (!g_gpu_on) return 0;
+    if (g_gpu_native.dbg_on) {
+        unsigned q;
+        int j;
+        g_gpu_native.dbg_on = 0;
+        out("polygons of frame "); outnum(frame); out(" taller than 25 pixels: "); outnum(g_gpu_native.dbg_n); out("\n");
+        for (q = 0; q < g_gpu_native.dbg_n && q < 24; q++) {
+            out("  cmd 0x"); outhex(g_gpu_native.dbg[q].cmd); out(" clut ("); outnum(g_gpu_native.dbg[q].clut_x); out(","); outnum(g_gpu_native.dbg[q].clut_y); out(") tpage x"); outnum(g_gpu_native.dbg[q].tp_x); out(" y"); outnum(g_gpu_native.dbg[q].tp_y); out(" mode"); outnum(g_gpu_native.dbg[q].tp); out(" twin "); outnum(g_gpu_native.dbg[q].twin[0]); out(","); outnum(g_gpu_native.dbg[q].twin[1]); out(","); outnum(g_gpu_native.dbg[q].twin[2]); out(","); outnum(g_gpu_native.dbg[q].twin[3]); out(" :");
+            for (j = 0; j < 4; j++) { out(" ("); outnum(g_gpu_native.dbg[q].x[j]); out(","); outnum(g_gpu_native.dbg[q].y[j]); out(" uv "); outnum(g_gpu_native.dbg[q].u[j]); out(","); outnum(g_gpu_native.dbg[q].v[j]); out(" rgb "); outnum(g_gpu_native.dbg[q].r[j]); out(","); outnum(g_gpu_native.dbg[q].g[j]); out(","); outnum(g_gpu_native.dbg[q].b[j]); out(")"); }
+            out("\n");
+        }
+    }
     ho = gpu_hash_vram(&g_gpu_orig); hn = gpu_hash_vram(&g_gpu_native);
     if (ho != hn) {
-        for (i = 0; i < GPU_VRAM_W * GPU_VRAM_H; i++) if (g_gpu_native.vram[i] != g_gpu_orig.vram[i]) { if (first == 0xffffffffu) first = i; n++; }
+        /* a pixel matters when the display shows it or when either machine has read it (texture / CLUT / StoreImage) since it was last written; a difference in pixels nobody has
+         * looked at is the uninitialised part of an uploaded buffer (retail: stale stack bytes) */
+        int dx0 = g_gpu_native.disp_x, dy0 = g_gpu_native.disp_y, dw = g_gpu_native.disp_w, dh = g_gpu_native.disp_h;
+        for (i = 0; i < GPU_VRAM_W * GPU_VRAM_H; i++) {
+            int px = (int)(i % GPU_VRAM_W), py = (int)(i / GPU_VRAM_W);
+            if (g_gpu_native.vram[i] == g_gpu_orig.vram[i]) continue;
+            if (!(g_gpu_native.rd[i] || g_gpu_orig.rd[i] || (px >= dx0 && px < dx0 + dw && py >= dy0 && py < dy0 + dh))) continue;
+            if (first == 0xffffffffu) first = i;
+            n++;
+        }
+        if (!n) goto vram_ok;
         out("FRAME "); outnum(frame); out(": the machines' VRAM differs in "); outnum(n); out(" pixels; first at ("); outnum(first % GPU_VRAM_W); out(", "); outnum(first / GPU_VRAM_W);
         out("): native 0x"); outhex(g_gpu_native.vram[first]); out(" original 0x"); outhex(g_gpu_orig.vram[first]); out("\n");
         out("  native: "); outnum(g_gpu_native.n_prims); out(" prims, display "); outnum(g_gpu_native.disp_w); out("x"); outnum(g_gpu_native.disp_h); out(" at ("); outnum(g_gpu_native.disp_x); out(", "); outnum(g_gpu_native.disp_y); out(")\n");
+        if (g_gpu_watch) { print_wlog(&g_gpu_native, "native"); print_wlog(&g_gpu_orig, "original"); }
         write_shot(&g_gpu_native, "diff_native_", frame); write_shot(&g_gpu_orig, "diff_orig_", frame);
         return 1;
     }
+vram_ok:
+    if (g_texdump_n && (unsigned)frame == g_texdump[0]) {
+        static unsigned char tex[256 * 256 * 3];
+        char path[64]; int i2 = 0, k2; const char* pre = "/shots/tex";
+        while (*pre) path[i2++] = *pre++;
+        for (k2 = 100000; k2 >= 1; k2 /= 10) path[i2++] = (char)('0' + (frame / k2) % 10);
+        path[i2++] = '.'; path[i2++] = 'p'; path[i2++] = 'n'; path[i2++] = 'g'; path[i2] = 0;
+        crc_init();
+        gpu_texpage_rgb(&g_gpu_native, (int)g_texdump[1], (int)g_texdump[2], (int)g_texdump[3], (int)g_texdump[4], (int)g_texdump[5], tex);
+        png_write(path, tex, 256, 256, 2);
+    }
     for (k = 0; k < g_nshot_list; k++) if (g_shot_list[k] == (unsigned)frame) want = 1;
     if (g_shot_every && (unsigned)frame >= g_shot_from && ((unsigned)frame - g_shot_from) % g_shot_every == 0) want = 1;
-    if (want) { write_shot(&g_gpu_native, "f", frame); g_shot_count++; }
+    if (want) {
+        write_shot(&g_gpu_native, "f", frame); g_shot_count++;
+        if (g_gpu_watch) print_wlog(&g_gpu_native, "native");
+        {
+            unsigned q3, nn;
+            out("  last DRAWENVs (clip x y w h | ofs | tpage isbg | frame):");
+            for (nn = g_gpu_native.n_env > 8 ? g_gpu_native.n_env - 8 : 0; nn < g_gpu_native.n_env; nn++) { q3 = nn & 7u; out(" ["); outnum(g_gpu_native.env_hist[q3][0]); out(" "); outnum(g_gpu_native.env_hist[q3][1]); out(" "); outnum(g_gpu_native.env_hist[q3][2]); out(" "); outnum(g_gpu_native.env_hist[q3][3]); out(" | "); outnum(g_gpu_native.env_hist[q3][4]); out(","); outnum(g_gpu_native.env_hist[q3][5]); out(" | "); outnum(g_gpu_native.env_hist[q3][6]); out(" "); outnum(g_gpu_native.env_hist[q3][7]); out(" | f"); outnum(g_gpu_native.env_hist[q3][8]); out("]"); }
+            out("  ; last DISPENVs (x y w h):");
+            for (nn = g_gpu_native.n_disp > 8 ? g_gpu_native.n_disp - 8 : 0; nn < g_gpu_native.n_disp; nn++) { q3 = nn & 7u; out(" ["); outnum(g_gpu_native.disp_hist[q3][0]); out(" "); outnum(g_gpu_native.disp_hist[q3][1]); out(" "); outnum(g_gpu_native.disp_hist[q3][2]); out(" "); outnum(g_gpu_native.disp_hist[q3][3]); out("]"); }
+            out("\n");
+        }
+        out("  [frame "); outnum(frame); out("] shot: "); outnum(g_gpu_native.n_prims); out(" prims so far, textured pixels 4bit "); outnum(g_gpu_native.n_tex_px[0]); out(" 8bit "); outnum(g_gpu_native.n_tex_px[1]);
+        out(" 15bit "); outnum(g_gpu_native.n_tex_px[2]); out(", pixels written "); outnum(g_gpu_native.n_px);
+        out("; LoadImage "); outnum(g_gpu_native.n_loadimage); out(" StoreImage "); outnum(g_gpu_native.n_storeimage); out(" MoveImage "); outnum(g_gpu_native.n_moveimage); out(" ClearImage "); outnum(g_gpu_native.n_clearimage);
+        out("; GP0 commands a0 "); outnum(g_gpu_native.n_cmd[0xa0]); out(" 80 "); outnum(g_gpu_native.n_cmd[0x80]); out(" c0 "); outnum(g_gpu_native.n_cmd[0xc0]); out(" 02 "); outnum(g_gpu_native.n_cmd[2]); out(" unknown "); outnum(g_gpu_native.n_unknown); out("\n");
+        out("  GP0 command histogram:"); { int q2; for (q2 = 0; q2 < 256; q2++) if (g_gpu_native.n_cmd[q2]) { out(" 0x"); outhex((unsigned)q2 & 255u); out("="); outnum(g_gpu_native.n_cmd[q2]); } } out("\n");
+    }
     return 0;
 }
 static int main_test(void) {
@@ -1135,7 +1199,11 @@ static int main_test(void) {
     pb.ctx = (void*)"native"; pb.r8 = nb_r8; pb.w8 = nb_w8; pb.write_bytes = nb_wb; pb.call = nb_call; pb.read_sector = read_sector; pb.frame = nb_frame; pb.log = log_call; pb.is_overlay = is_overlay_lba; pb.interp_reexec = 0; pb.valid = nb_valid; pb.stack_lo = MAIN_STACK_WINDOW; pb.stack_hi = MAIN_STACK_WINDOW + MAIN_STACK_BYTES;
     hle_init(&hle_i, &pa);
     hle_init(&g_hle_native, &pb);
-    if (g_gpu_on) { gpu_reset(&g_gpu_orig); gpu_reset(&g_gpu_native); hle_i.gpu = &g_gpu_orig; g_hle_native.gpu = &g_gpu_native; }
+    if (g_gpu_on) {
+        gpu_reset(&g_gpu_orig); gpu_reset(&g_gpu_native); hle_i.gpu = &g_gpu_orig; g_hle_native.gpu = &g_gpu_native;
+        { unsigned q; g_gpu_orig.n_skip = g_gpu_native.n_skip = g_nskipcmd; for (q = 0; q < g_nskipcmd; q++) g_gpu_orig.skip_cmd[q] = g_gpu_native.skip_cmd[q] = g_skipcmd[q]; }
+        if (g_gpu_watch) { g_gpu_orig.watch_on = g_gpu_native.watch_on = 1; g_gpu_orig.watch_x = g_gpu_native.watch_x = g_gpu_watch_x; g_gpu_orig.watch_y = g_gpu_native.watch_y = g_gpu_watch_y; }
+    }
 
     /* --- run the ORIGINAL from the entry point to main() --- */
     g_main_addr = addr_of("main");
@@ -1175,6 +1243,8 @@ static int main_test(void) {
         }
         hle_i.trace_n = g_hle_native.trace_n = 0; hle_i.trace_lost = g_hle_native.trace_lost = 0;
         hle_i.otdump_n = g_hle_native.otdump_n = 0;
+        g_gpu_orig.cur_frame = g_gpu_native.cur_frame = (unsigned)frame;
+        if (g_gpu_on && g_polydump && (unsigned)frame == g_polydump) { g_gpu_native.dbg_on = 1; g_gpu_native.dbg_n = 0; }
 #ifdef REPLAY_FRAME
         if (frame == REPLAY_FRAME) {                                             /* record the original's calls, then compare the native game's live */
             build_event_tables(); n_ev_int = 0; g_ev_idx = 0; g_ls_ignore_enter = 0;

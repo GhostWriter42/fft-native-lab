@@ -1,8 +1,9 @@
 # Random-play soak of the whole-program lockstep: many games with different random controller input, native build vs original machine code, RAM compared at every VSync.
-#   .\port\native\soak.ps1 [-From 1] [-Count 20] [-Frames 8000] [-Parallel 6] [-PadFrom 1180] [-Rebuild]
+#   .\port\native\soak.ps1 [-From 1] [-Count 20] [-Frames 8000] [-Parallel 6] [-PadFrom 1180] [-Rebuild] [-NoBuild] [-PokeWhen ...] [-Gpu]
+#   (-Gpu: also compare the two software-GPU VRAMs at every frame; -PokeWhen: cheats, see lockstep.ps1; FFT_LS_VOL: another docker volume for the compiled objects)
 # Builds the program once (lockstep.ps1 -Scenario title -BuildOnly), then runs it once per seed with `-TitleToBattle -PadSeed <seed>` (the fixed START/CIRCLE presses into the
 # first battle, then random play from -PadFrom on). Logs: port\build\soak\seed_<n>.log; the summary is printed and written to port\build\soak\summary.txt.
-param([int]$From = 1, [int]$Count = 20, [int]$Frames = 8000, [int]$Parallel = 6, [int]$PadFrom = 1180, [switch]$Rebuild, [switch]$NoBuild, [string]$PokeWhen = '')
+param([int]$From = 1, [int]$Count = 20, [int]$Frames = 8000, [int]$Parallel = 6, [int]$PadFrom = 1180, [switch]$Rebuild, [switch]$NoBuild, [string]$PokeWhen = '', [switch]$Gpu)
 $root = Split-Path $PSScriptRoot -Parent
 $repo = Join-Path (Split-Path $root -Parent) 'fft_decomp'
 $bin  = Join-Path (Split-Path $root -Parent) 'game\Final Fantasy Tactics.bin'
@@ -22,10 +23,10 @@ $seeds = $From..($From + $Count - 1)
 $sw = [Diagnostics.Stopwatch]::StartNew()
 $results = $seeds | ForEach-Object -ThrottleLimit $Parallel -Parallel {
     $seed = $_
-    $root = $using:root; $repo = $using:repo; $bin = $using:bin; $soak = $using:soak; $vol = $using:vol; $Frames = $using:Frames; $PadFrom = $using:PadFrom; $PokeWhen = $using:PokeWhen
+    $root = $using:root; $repo = $using:repo; $bin = $using:bin; $soak = $using:soak; $vol = $using:vol; $Frames = $using:Frames; $PadFrom = $using:PadFrom; $PokeWhen = $using:PokeWhen; $Gpu = $using:Gpu
     . (Join-Path $root 'native\padgen.ps1')
     $cfg = Join-Path $soak "cfg_$seed.txt"
-    [System.IO.File]::WriteAllText($cfg, (New-RunConfig -Frames $Frames -PadSeed $seed -PadFrom $PadFrom -TitleToBattle -PokeWhen $PokeWhen))
+    [System.IO.File]::WriteAllText($cfg, (New-RunConfig -Frames $Frames -PadSeed $seed -PadFrom $PadFrom -TitleToBattle -PokeWhen $PokeWhen -Gpu:$Gpu))
     $log = Join-Path $soak "seed_$seed.log"
     $covDir = Join-Path $soak "cov_$seed"
     New-Item -ItemType Directory -Force $covDir | Out-Null

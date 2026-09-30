@@ -78,11 +78,10 @@ unsigned hle_call(hle_t* h, const char* name, unsigned nargs, unsigned a0, unsig
     X(OpenEvent) X(CloseEvent) X(EnableEvent) X(DisableEvent) X(TestEvent) X(WaitEvent) X(DeliverEvent) X(UnDeliverEvent) \
     X(EnterCriticalSection) X(ExitCriticalSection) X(SetMem) X(PadInit) X(PadRead) X(PadStop) X(_otc)
 
-/* Hand-written RENDER-ONLY routines of the overlays (they only build pixel images and GPU packets that the renderer consumes). The lockstep
- * skips them on BOTH machines (the interpreter never runs the original bytes, the native side gets a no-op), so the rest of the game can be
- * compared without transliterating them first; their native versions are a separate verification job (harness_diff_asm.c). */
+/* Routines the lockstep skips on BOTH machines (the interpreter never runs the original bytes, the native side gets a no-op). Hand-written render-only routines used
+ * to be listed here until they had native versions (the text blitters: replacements/world_asm.c, battle_asm2.c; the four BATTLE map polygon queuers: battle_asm3.c,
+ * generated from the machine code by tools/mips2c.py); what is left is the FMV start. */
 #define HLE_SKIP_NAMES(X) \
-    X(battle_map_queue_textured_triangles) X(battle_map_queue_textured_quads) X(battle_map_queue_untextured_triangles) X(battle_map_queue_untextured_quads) \
     X(open_movie_start_stream)
 
 /* Functions whose ENTRY lets virtual time pass (they poll a variable that the vertical-blank interrupt updates, in a loop with no SDK call): they are

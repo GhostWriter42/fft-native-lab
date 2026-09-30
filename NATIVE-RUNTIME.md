@@ -163,33 +163,93 @@ What the higher-level HLE had to learn to get this far: `ClearOTagR`'s DMA chann
 `DeliverEvent`, 32 events) with a console that has **no memory card** (every card command is accepted and answered with the software-card TIMEOUT event --
 the game's card polling otherwise never terminates), and scripted `PadRead`. The native game runs on a stack **inside the RAM image** (top 64 KiB,
 like the console's) because code such as the name-entry screen builds GPU ordering tables from stack locals whose 24-bit addresses must stay valid.
-The render-only hand-written routines (BATTLE's four polygon queuers and two glyph blitters, WORLD's two blitters) are *skipped on both machines*
-(`HLE_SKIP_NAMES`): the interpreter never runs the original bytes and the native side gets a no-op, so the rest of the game can be compared before they
-are transliterated (they are the part the HD renderer replaces anyway).
+At this stage the render-only hand-written routines (BATTLE's four polygon queuers and two glyph blitters, WORLD's two blitters) were *skipped on both machines*
+(`HLE_SKIP_NAMES`: the interpreter never ran the original bytes and the native side got a no-op) so that the rest of the game could be compared before they were
+transliterated; they all have native versions now (see Result 4) and only the FMV start is still skipped.
 
-Tooling for finding the cause of a divergence (or hang): a watchdog reports a native frame that never reaches its next VSync with a backtrace;
-`-Watch sym,...` prints game variables as they change; `-Replay N` records the original's *function-call sequence* for frame N, then runs the native game
-under live comparison against it (the game is always compiled with `-finstrument-functions`, the hook is a no-op otherwise) and stops at the first call
-that differs -- or reports that the original itself never finishes the frame, with its registers; `-Dump N` / `-DumpAround fn` print the calls at the
-start of the frame / around a function.
+**Result 3: real play.** `-TitleToBattle` (START/CIRCLE presses, frames 600-1180) takes a new game into its first battle at frame ~1170; from there random
+controller input (`padgen.ps1`: d-pad runs, confirm, cancel, menu, camera, weighted like menu navigation; every seed is a different game) drives it through unit
+menus, movement, attacks, the AI's turns and the EVENT overlays (BUNIT, EQUIP, JOBSTTS, HELPMENU, OPTION, REQUIRE ... are loaded by the game's own menus and run
+natively too). With a cheat that ends the first battle (`-PokeWhen`, see below) the same harness reaches the **world map with the WLDCORE + WORLD overlays** (menus, shops,
+formation, tutorials). `soak.ps1` runs one docker container per seed, 12-16 in parallel, each a complete lockstep (RAM at every VSync; VRAM with `-Gpu`):
 
-Open problem found with it: in the first frame of the WORLD name-entry screen the ORIGINAL code, on this HLE, spins in the window-frame display script
-(600,000+ calls without reaching VSync) -- the environment the HLE provides is not yet what that screen expects (text sections / thread state); not a
-native divergence.
+| Soak | Seeds x frames | Result |
+|---|---|---|
+| title -> battle, random play | 40 x 12,000 | all identical (RAM and VRAM), 74 s wall on 12 parallel runs |
+| world map (poked), random play | 24 x 9,000 | all identical (RAM and VRAM) |
+| title -> battle, 30,000-frame button mash | 1 | identical |
+| title -> battle, long | 40 x 60,000 | 35 identical at the last full run; the 5 others were dead stack garbage (see "Comparison rules") -- fixed, re-run pending |
 
-Ignored words (documented, not bugs): the kernel area below 0x8000f800 (the SDK's exception-vector patches -- the interpreter fakes the kernel
-tables), `g_psyq_crt_constructors_ran` and the `g_psyq_*_saved_ra` words (saved by hand-written SDK code; `__main` is not called natively), the thread
-records' register save area, the two saved-`$ra` words of `battle_thread_call_on_main_stack`.
+Function coverage of the native game (union over the soak seeds, `build\soak\coverage.txt`): main 325/821, battle 1,247/1,912, opening 70/150, event overlays 272/777,
+world 608/1,013, wldcore 138/435; effect overlays are hardly reached by random play (an ability with an effect must be used: 3 EFFECT loads in ~10 long seeds).
+
+What the platform layer had to learn for this (all in `hle/hle.c`, `lockstep.c`, `r3000/`): CD streaming (`CdRead2`/`CdReady`/`CdGetSector`/`CdDataSync`/`CdStatus`), the
+`VSync(1)` scanline counter (a function of the call history, identical on both machines), tick hooks (virtual vblanks inside polling loops that contain no SDK call),
+the BIOS event system with a no-card console, thread stacks and the main stack inside the mapped RAM window (`thread_window.h`: their addresses go into GPU ordering tables),
+the zero-filled stack frames of the oracle (`zero_frames`, the native side is compiled with `-ftrivial-auto-var-init=zero`), an optional mapped NULL page that logs the
+places where retail reads console RAM through a NULL pointer, per-function coverage thunks.
+
+**Result 4: pictures.** `hle/gpu.c` is a software model of the PlayStation GPU (1024x512 VRAM, drawing environment, flat/gouraud/textured triangles and quads, sprites and
+tiles, lines, fills and VRAM copies, 4/8/15-bit textures through CLUTs, texture window, the four semi-transparency modes). The HLE feeds it the calls the real GPU would
+get on BOTH machines (`DrawOTag`, `LoadImage`, `StoreImage`, `MoveImage`, `ClearImage`, `PutDrawEnv`, `PutDispEnv`), so the original machine code and the native build each draw
+into their own VRAM; `-Gpu` compares the two VRAMs at every frame (a pixel counts when the display shows it or either machine has read it as texture/CLUT/StoreImage data: the
+unread rest of an uploaded buffer is uninitialised stack on retail) and `-Shot` writes the native display as PNG. **The native game draws the title screen, the memory-card
+warning, the location banners, the opening event's dialogue with its sprites, the world map with its menus (Move / Formation / Brave Story / Tutorial / Data / Option, war
+funds, the party marker) and the first battle (map polygons, units, menus, status panel, rain), bit-identical with what the original code draws.** Pictures:
+`port\samples\native-frames\`. Getting there needed native versions of the hand-assembled render routines that the lockstep used to skip: the four text blitters are
+literal transliterations (`replacements/world_asm.c`, `battle_asm2.c`); the four GTE map-polygon queuers (188-220 instructions each) are generated from the machine code by
+`tools/mips2c.py` (`replacements/battle_asm3.c`), a small static binary translator (delay slots, GTE through the software GTE, load-delay hazards reported) that also works for
+any other leaf routine. Two GPU details the game depends on, found by looking at the pictures: libgpu clamps the clip rectangle of a DRAWENV (the deployment screens ask for
+x = -128: clamped to 0; masking it wrapped pixels into the texture pages at the right edge of the VRAM and striped every wall), and `StoreImage` must return what is in VRAM.
+
+The framebuffer is currently plain 1x VRAM; the same model with an internal scale factor, bilinear/scaled texture sampling and widescreen is the HD renderer (`ROADMAP.md`).
+
+**Comparison rules** (documented, not bugs): the kernel area below 0x8000f800; `g_psyq_crt_constructors_ran` and the `g_psyq_*_saved_ra` words; the thread records' register
+save areas and stacks; the first 23 words of the scratchpad (the hand-assembled blitters and 64-bit routines park registers and loop temporaries there); a word that holds a
+stack address or a GPU tag pointing into a stack counts as equal when both machines' values are in the same stack (class = main / battle thread n / world thread n), and a word
+whose stack-address bytes were only partly overwritten keeps "equal" as long as the surviving residue bytes are the ones that differed before (`residue_equal`); dead garbage
+that retail leaves in unused struct padding / unassigned locals and natively is zero: `effect_list_node_t._padding_15`, the upper half of the turn banner's
+`projected_display_value` (and its HELPMENU copy); HLE calls whose arguments are addresses in the same thread stack are the same call; VRAM pixels nobody has read.
+
+**Retail-ABI accidents the lockstep found** (each is a place where the decomp's C relies on what the MIPS compiler happened to do; all fixed by a reviewed, exact-match patch in
+`native/native_patches.py` (applied to the portified copy only) or by a generic pass in `tools/portify.py`; `git diff` of the repository stays empty):
+
+| Class | Example | Fix |
+|---|---|---|
+| stale-register arguments (`((void (*)(void))f)()` of a function that takes arguments) | `main_party_save_unit`, `battle_effect_init_data`, `battle_unit_set_target_animation_from_attack_type`, the opcode-handler tables of BUNIT/EQUIP | patch: pass the value the register holds (established by replaying the original) |
+| a `void` callee's leftover `$v0` is consumed | `equip_menu_update_*_selection_and_mark_change`, `world_gfx_bind_data_pointer` | patch: make the value explicit |
+| narrow return value consumed as 32 bits (`s16`/`u8` getter cast to `s32`): retail callees return already extended values, x86 leaves the upper bits undefined | `world_input_get_tutorial_buttons` (input word 0x8000 vs 0xffff8000), 18 more | portify pass: the cast call becomes a real call with a widening cast (19 sites) |
+| adjacent locals / argument slots used as an array | `corner0..3`, `cursor_polys[2]`+`shadow_polys[2]`, `wldcore_window_build_render_record_image` reading `position` and `dimensions` as 8 contiguous bytes | patch: explicit arrays / field copies |
+| address of a pointer passed where the pointer was meant | `SetSemiTrans(&frame, 1)` in both scroll-list threads (writes one byte past the slot: padding on MIPS, a live local natively: row_offset became 0x02000000) | patch: drop the call (provably a no-op in retail) |
+| index one past a 4-byte array | `battle_ai_choose_wait_facing` reads `viable_directions[4]` when the unit stands on the target: unused stack padding in retail | patch: explicit zero byte |
+| uninitialised locals / stack padding | `world_menu_build_available_item_list` (`selected` when the current location is not in the list), `battle_menu_display_projected_action_effect` (`value`), `fallback_direction` | compare rule (dead value) or scenario fix |
+| NULL-pointer reads of console low RAM | thread status indicators, `RotTrans(NULL)`, `battle_menu_build_unit_portrait_poly`, `world_formation_stage_selected_unit` (empty party) | source stand-ins; the NULL page logs the rest |
+| code bytes read as data (the native code region holds x86 trampolines) | the BATTLE scroll list derives CLUT rows from a buffer `StoreImage` was supposed to fill (no VRAM: stale overlay code) | `StoreImage` returns real VRAM contents |
+| cross-stack pointers in RAM | GPU tags linking to packets on a thread stack | comparison rule above |
+
+Native transliterations of hand-assembled routines added on the way: `world_gs_sortpoly` (libgs `GsSortPoly`, undecompiled, registered through `yamlfuncs.EXTRA_FUNCTIONS`),
+the four text blitters, the four map queuers.
+
+Tooling for finding the cause of a divergence (flags of `lockstep.ps1`, see `port\README.md`): a watchdog reports a native frame that never reaches its next VSync with a backtrace;
+`-Watch` prints game variables as they change; `-Replay N` records the original's *function-call sequence* for frame N (with arguments, callers, the scratchpad and watched words at
+every entry and the original's writers of the first watched word), then runs the native game under live comparison and stops at the first call, argument, watched word or
+scratchpad word that differs; `-Dump N` / `-DumpAround fn` print the calls with their callers; `-NatWatch` reports every store of the native game to a word (page protection plus
+single step) with the storing function; the RAM report shows the words around the first difference; `-GpuWatch x,y` lists the SDK calls that wrote one VRAM pixel; `-PolyDump`,
+`-TexDump`, `-SkipCmd` look at what the rasteriser is fed. Finding a divergence in a 60,000-frame run typically takes one `-Replay` and one `-Watch`.
 
 Bugs this found (all fixed): the interpreter's BIOS function numbers for `strlen/bcopy/bzero/memcpy/memset/memcmp` were off by one against the game's own
 veneers (`bcopy` was executing as `bzero`), which had silently made the function fuzz skip every function that reached them; `main_noop_800449ec`
 (a `kind: blocked` stub) was missing from the native tables, so a call through its PS1 address executed MIPS code as x86; the native `main()` stored 0
-where retail stores its `$sp` for the soft reset and had no way to restart the game loop (now a builtin `setjmp`/`longjmp` in `replacements\main_asm.c`).
+where retail stores its `$sp` for the soft reset and had no way to restart the game loop (now a builtin `setjmp`/`longjmp` in `replacements\main_asm.c`); an
+undecompiled libgs routine (`world_gs_sortpoly`) was executed as x86 (its MIPS bytes decoded as a call); and the retail-ABI accidents of the table above.
 
 ## 10. Open items
 
-* Overlay switching in the native runtime (per-overlay stub tables, trampolines installed when the module's image lands, data ranges recomputed),
-  so that the lockstep can continue through OPEN -> WORLD -> BATTLE; the same fuzz for WORLD / WLDCORE / OPEN / EVENT / EFFECT.
-* HLE of the rest of the SDK: `CdRead2` streaming, scripted pad input, the memory card, GPU lists (`DrawOTag`) for a null renderer, then a real one.
-* The four GTE map-queue routines and the two blitters (or their replacement by the HD renderer).
-* A source-level division policy for non-x86 targets; the thread-context snapshot for rollback.
+* Audio: the SPU (XA streams, ADPCM voices, reverb) is still only logged by the HLE; the movies (MDEC) are skipped.
+* Effect overlays (110 files, 210 functions with yaml docs) are barely exercised: a scenario that makes units use many abilities (poke the skillsets), or a per-function
+  fuzz of the EFFECT module set.
+* The rest of the WLDCORE/WORLD surface (travel, shops, formation, tutorials) with deeper random play; the world soak starts from a poked state (no story events ran).
+* Verify the GPU model against a reference (an emulator's output for the same frames) -- the frames look right, but bit-exactness with the hardware (dithering, exact
+  edge rules) has not been checked; dithering is not modelled.
+* The HD renderer proper: internal scale factor, scaled/filtered texture sampling, widescreen; then the platform layer (window, input, audio) outside the test harness.
+* A source-level division policy for non-x86 targets; the thread-context snapshot for rollback / netplay.

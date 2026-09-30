@@ -8,6 +8,7 @@
 # -PokeWhen 'cond_symbol=value:symbol=value,...'   cheats: once, when the word at the first symbol equals the value, store the second value at the second symbol (both machines), e.g.
 #             'g_battle_game_state=0x27:g_battle_game_state=0x3b' closes the battle at the first change of turn (-> the world map)
 # -Gpu  attach the software GPU (hle\gpu.c) to both machines: VRAM is compared at every frame; -Shot 'f1,f2' / -ShotEvery N [-ShotFrom F] write the native display as PNG to port\build\shots (-ShotScale 1..3)
+# -GpuWatch 'x,y'  (with the GPU) list the operations that wrote that VRAM pixel in the frame where the two VRAMs first differ, on both machines
 # -NatWatch 'sym+off[:FROM_FRAME]'   report every store of the NATIVE game to that word (page protection + single step: slow), with the storing instruction resolved to a function
 # -Replay N   at frame N run the ORIGINAL first, record its function-call sequence, then run the native game under live comparison: the first different call (or a hang) is reported
 # -Dump N     with -Replay: also print the first N calls of the replayed frame (function, first two arguments)
@@ -19,7 +20,7 @@
 #                               are also compared at every function entry (the first entry where the native game's value differs is reported)
 # -BuildOnly  compile and link the program (kept in the docker volume) without running it;  -RunOnly  run the program linked by an earlier build (no generators, no
 #             compilation: soak.ps1 uses this once per random input script). Build flags (-Scenario, -Replay, -Cflags, -Watch ...) are baked into the program.
-param([int]$Frames = 60, [int]$Log = 0, [switch]$Rebuild, [switch]$NoDivFix, [string]$Scenario = '', [string]$Pad = '', [string]$Watch = '', [string]$Peek = '', [int]$Replay = 0, [int]$Dump = 0, [string]$DumpAround = '', [string]$Cflags = '', [int]$PadSeed = 0, [int]$PadFrom = 1180, [switch]$TitleToBattle, [switch]$RunOnly, [switch]$BuildOnly, [int]$Where = 0, [string]$PokeWhen = '', [string]$NatWatch = '', [switch]$Gpu, [string]$Shot = '', [int]$ShotEvery = 0, [int]$ShotFrom = 1, [int]$ShotScale = 1)
+param([int]$Frames = 60, [int]$Log = 0, [switch]$Rebuild, [switch]$NoDivFix, [string]$Scenario = '', [string]$Pad = '', [string]$Watch = '', [string]$Peek = '', [int]$Replay = 0, [int]$Dump = 0, [string]$DumpAround = '', [string]$Cflags = '', [int]$PadSeed = 0, [int]$PadFrom = 1180, [switch]$TitleToBattle, [switch]$RunOnly, [switch]$BuildOnly, [int]$Where = 0, [string]$PokeWhen = '', [string]$NatWatch = '', [switch]$Gpu, [string]$Shot = '', [int]$ShotEvery = 0, [int]$ShotFrom = 1, [int]$ShotScale = 1, [string]$GpuWatch = '', [int]$PolyDump = 0, [string]$TexDump = '', [string]$SkipCmd = '')
 . (Join-Path $PSScriptRoot 'padgen.ps1')
 $root = Split-Path $PSScriptRoot -Parent
 $repo = Join-Path (Split-Path $root -Parent) 'fft_decomp'
@@ -30,7 +31,7 @@ New-Item -ItemType Directory -Force $nb | Out-Null
 $vol = if ($env:FFT_LS_VOL) { $env:FFT_LS_VOL } else { 'fft-ls-objs' }          # FFT_LS_VOL: another docker volume, for a build that must not disturb a running soak
 # the run configuration (frames, controller script) is read by the program at start-up
 $cfg = Join-Path $nb 'run.cfg'
-[System.IO.File]::WriteAllText($cfg, (New-RunConfig -Frames $Frames -Pad $Pad -PadSeed $PadSeed -PadFrom $PadFrom -TitleToBattle:$TitleToBattle -PokeWhen $PokeWhen -NatWatch $NatWatch -Gpu:$Gpu -Shot $Shot -ShotEvery $ShotEvery -ShotFrom $ShotFrom -ShotScale $ShotScale))
+[System.IO.File]::WriteAllText($cfg, (New-RunConfig -Frames $Frames -Pad $Pad -PadSeed $PadSeed -PadFrom $PadFrom -TitleToBattle:$TitleToBattle -PokeWhen $PokeWhen -NatWatch $NatWatch -Gpu:$Gpu -Shot $Shot -ShotEvery $ShotEvery -ShotFrom $ShotFrom -ShotScale $ShotScale -GpuWatch $GpuWatch -PolyDump $PolyDump -TexDump $TexDump -SkipCmd $SkipCmd))
 $shots = Join-Path $root 'build\shots'
 New-Item -ItemType Directory -Force $shots | Out-Null
 $runVolumes = @('--volume', "${shots}:/shots", '--volume', "${root}:/port", '--volume', "${vol}:/ob", '--volume', "$($repo)\build\extracted\files:/disc:ro", '--volume', "${bin}:/disc.bin:ro", '--volume', "${cfg}:/run.cfg:ro")

@@ -68,7 +68,7 @@ function New-PokeLines([string]$PokeWhen) {
     return $lines
 }
 
-function New-RunConfig([int]$Frames, [string]$Pad = '', [int]$PadSeed = 0, [int]$PadFrom = 1180, [switch]$TitleToBattle, [string]$PokeWhen = '', [string]$NatWatch = '', [switch]$Gpu, [string]$Shot = '', [int]$ShotEvery = 0, [int]$ShotFrom = 1, [int]$ShotScale = 1) {
+function New-RunConfig([int]$Frames, [string]$Pad = '', [int]$PadSeed = 0, [int]$PadFrom = 1180, [switch]$TitleToBattle, [string]$PokeWhen = '', [string]$NatWatch = '', [switch]$Gpu, [string]$Shot = '', [int]$ShotEvery = 0, [int]$ShotFrom = 1, [int]$ShotScale = 1, [string]$GpuWatch = '', [int]$PolyDump = 0, [string]$TexDump = '', [string]$SkipCmd = '') {
     $all = [System.Collections.Generic.List[object]]::new()
     $n = 0
     if ($Pad) {
@@ -77,6 +77,10 @@ function New-RunConfig([int]$Frames, [string]$Pad = '', [int]$PadSeed = 0, [int]
     if ($TitleToBattle) { foreach ($e in (New-TitleToBattlePad)) { $all.Add([pscustomobject]@{ F = [int]$e[0]; N = $n++; B = $e[1] }) } }
     if ($PadSeed -gt 0) { foreach ($e in (New-RandomPad $PadSeed $PadFrom $Frames)) { $all.Add([pscustomobject]@{ F = [int]$e[0]; N = $n++; B = $e[1] }) } }
     $lines = @("frames $Frames") + (New-PokeLines $PokeWhen)
+    foreach ($c in ($SkipCmd -split ',' | Where-Object { $_ })) { $lines += "skipcmd $([int]$c)" }       # rasteriser debugging: polygon command bytes that are not drawn
+    if ($TexDump) { $Gpu = [switch]$true; $lines += 'texdump ' + (($TexDump -split ',' | ForEach-Object { [int]$_ }) -join ' ') }     # frame,tpx,tpy,mode,clutx,cluty: a texture page decoded as /shots/tex<frame>.png
+    if ($PolyDump) { $Gpu = [switch]$true; $lines += "polydump $PolyDump" }                               # print the tall textured polygons of that frame (rasteriser debugging)
+    if ($GpuWatch) { $gw = $GpuWatch -split ','; $Gpu = [switch]$true; $lines += ('gpuwatch {0} {1}' -f [int]$gw[0], [int]$gw[1]) }      # log the writes to one VRAM pixel of both machines
     if ($Gpu -or $Shot -or $ShotEvery) { $lines += 'gpu 1' }                                    # software GPU: VRAM compared at every frame; screenshots (PNG) of the listed frames to port\build\shots
     foreach ($f in ($Shot -split ',' | Where-Object { $_ })) { $lines += "shot $([int]$f)" }
     if ($ShotEvery) { $lines += "shotevery $ShotEvery $ShotFrom" }

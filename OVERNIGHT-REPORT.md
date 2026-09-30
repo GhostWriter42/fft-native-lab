@@ -1,20 +1,46 @@
 # FFT decomp — working report
 
-Started 2026-09-29 (evening). Last updated 2026-09-30 (small hours). Newest status at the top.
+Started 2026-09-29 (evening). Last updated 2026-09-30 (late). Newest status at the top.
 
-## Latest: the native game boots in lockstep with the original code
+## Latest: the native game draws real frames, bit-identical with the original code
 
-`port\native\lockstep.ps1` compiles the game's C (`src/main` + `src/battle` + the SDK sources that are not hardware) with a modern compiler, boots
-it headless from `main()` on a shared high-level emulation of the SDK's hardware layer, and runs the **original machine code** next to it on the
-R3000 interpreter (same HLE, own RAM image). **RAM is compared word for word at every VSync: 445 frames identical, from `main()` through the logos,
-sound init and system-file loading to the first code-overlay load (OPEN.BIN), with zero calls into stubbed functions.** That is the first
-whole-program equivalence result for the native port. What the work shook out (all fixed): the interpreter's BIOS function numbers were off by one for
-`strlen/bcopy/bzero/memcpy/memset`, a missing native for a 12-byte callable no-op, a native thread-start bounds bug (found by the function fuzz), and the
-native soft-reset mechanism (`setjmp`/`longjmp`). The last two function-fuzz crashes are classified (a stale-argument site of the original game and the
-thread-start bug), so **all 25 flagged fuzz functions are now explained**. Design and numbers: `NATIVE-RUNTIME.md` sections 7-9.
+The decomp's C (plus a short list of reviewed patches for places where it relied on what the 1990s MIPS compiler happened to do) is compiled with a modern compiler into a
+32-bit program that runs the **whole game** -- boot, title menu, new game, name entry, the opening events, the first battle, and (with a cheat that ends that battle) the world
+map -- on a high-level emulation of the SDK's hardware layer and a software model of the GPU. Next to it runs the **original machine code from your disc** on a MIPS R3000
+interpreter, on the same platform layer. The two machines are compared at every frame: **all 2 MiB of RAM, the scratchpad, every call into the platform layer, and (new) the
+1 MiB of VRAM the two machines drew**. A difference is localised to a function, a call argument, or a single store.
 
-Next: overlay switching (per-overlay tables + trampolines) so the lockstep can go on through OPEN -> WORLD -> BATTLE, then scripted pad input and CD streaming.
-Still nothing pushed, published or downloaded.
+What it shows now (pictures in `port\samples\native-frames\`, rendered by the native build at 2x for viewing): the title screen, the memory-card warning, the location banner
+"Orbonne Monastery", the opening event's dialogue with sprites ("God, please help us sinful children of Ivalice."), the **world map** with its menu (Move / Formation /
+Brave Story / Tutorial / Data / Option, War Funds, the party marker), and the **first battle**: textured 3D map, units, menus, the status panel with Ramza's portrait, rain.
+
+| Verification | Result |
+|---|---|
+| title -> first battle, random play (40 seeds x 12,000 frames, 12-16 docker runs in parallel) | RAM and VRAM identical at every frame |
+| world map, random play (24 seeds x 9,000 frames, poked start state) | RAM and VRAM identical at every frame |
+| 60,000-frame games (40 seeds) | 35 of 40 identical at the last full run; the 5 others diverged only in dead stack garbage (now tolerated; re-run pending) |
+| function coverage reached by these runs | main 325/821, battle 1,247/1,912, events 272/777, world 608/1,013, wldcore 138/435, opening 70/150 (effect overlays barely) |
+
+What this took (all documented in `NATIVE-RUNTIME.md` section 9): whole-program lockstep with overlay switching (126 modules), CD streaming / event / pad / timing models,
+function-level replay to find the first different call or argument, a native store watch, soak tooling with random-play seeds, a software GPU (VRAM, rasteriser, the libgpu
+corner cases), native versions of the hand-assembled routines the game needs to draw (text blitters by hand, the four GTE map-polygon routines by `tools/mips2c.py`, a small
+static binary translator), and **39 reviewed, exact-match patches (48 source sites)** for retail-ABI accidents that the comparison found (stale-register arguments, narrow return values, adjacent
+locals used as arrays, `SetSemiTrans(&pointer)`, an out-of-bounds index, uninitialised locals, NULL-pointer reads ...). `git diff` of `fft_decomp` stays empty: patches apply to
+the generated copy only, so the master-derived branches stay byte-exact with the disc.
+
+What it means for your goals: the **HD renderer** has its foundation -- the game's GPU traffic goes through one model that can render at any internal scale (the picture
+pipeline and the verification harness are in place: a scaled renderer can be checked against the 1x one); the **multiplayer** question gets its first hard evidence -- two
+independent builds of the same game stay bit-identical over tens of thousands of frames of real play, which is what lockstep netcode needs.
+
+Still open (details: `NATIVE-RUNTIME.md` section 10): audio (SPU / XA) and movies, the effect overlays (ability animations) beyond a handful of files, deeper world-map play,
+checking the GPU model against a real emulator's frames (dithering and hardware edge rules are not modelled), then the HD renderer and a real window/input/audio layer.
+Nothing was pushed, published or downloaded; everything is local commits in the project repo.
+
+Reproduce (PowerShell, Docker running, `port\build\portable` built by `.\port\tools\mktree.ps1`):
+
+    .\port\native\lockstep.ps1 -Frames 12000 -Scenario title -TitleToBattle -PadSeed 10 -Gpu -ShotEvery 1000 -ShotFrom 3000 -ShotScale 2     # pictures in port\build\shots
+    .\port\native\soak.ps1 -From 1 -Count 40 -Frames 12000 -Parallel 12 -Gpu                                                               # the random-play soak
+    .\port\native\lockstep.ps1 -Frames 2600 -Scenario title -TitleToBattle -PadSeed 5 -PadFrom 1200 -Gpu -ShotEvery 200 -ShotFrom 1200 -PokeWhen 'g_open_system_runtime_flags=0x41c0:g_open_system_result=1,g_open_system_runtime_flags=0x41c0:0x8005794c=1'   # the world map
 
 ## TL;DR
 
