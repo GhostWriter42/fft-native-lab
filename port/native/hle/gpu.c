@@ -35,11 +35,13 @@ static unsigned blend(unsigned b, unsigned f, int abr) {
     }
     return out;
 }
+static void hd_block(gpu_t* g, int x, int y, unsigned col, int semi);
 static void put_pixel(gpu_t* g, int x, int y, unsigned col, int semi) {
     unsigned short* p;
     if (x < g->clip_x1 || x > g->clip_x2 || y < g->clip_y1 || y > g->clip_y2) return;
     p = &g->vram[(y & 511) * GPU_VRAM_W + (x & 1023)];
     if (g->mask_check && (*p & 0x8000u)) return;
+    if (g->hd_s > 1) hd_block(g, x, y, col, semi);
     if (semi) col = blend(*p, col, g->abr);
     *p = (unsigned short)((col & 0x7fffu) | (g->mask_set ? 0x8000u : 0));
     g->rd[(y & 511) * GPU_VRAM_W + (x & 1023)] = 0;
@@ -47,6 +49,59 @@ static void put_pixel(gpu_t* g, int x, int y, unsigned col, int semi) {
     WATCH(g, x, y, *p);
 }
 static unsigned rgb555(unsigned r, unsigned g, unsigned b) { return (r >> 3) | ((g >> 3) << 5) | ((b >> 3) << 10); }
+
+
+/* ------------------------------------------------------------------------------------------------------ HD canvases */
+/* The two display buffers are kept a second time at hd_s times the resolution. Everything drawn into a buffer is drawn into its canvas as well: polygons are rasterised
+ * on the finer grid (the texel is chosen per HD pixel: nearest-neighbour, affine like the hardware), every other pixel write of the 1x path (sprites, tiles, lines) becomes an
+ * hd_s x hd_s block, and direct VRAM writes (fills, image uploads, copies) are re-synchronised from VRAM. The 1x VRAM stays authoritative: the game reads it back. */
+static int hd_index(const gpu_t* g) {                                           /* the canvas the current drawing area draws into, or -1 */
+    int k;
+    if (g->hd_s < 2) return -1;
+    for (k = 0; k < g->hd_n; k++)
+        if (g->clip_x1 >= g->hd_fx[k] && g->clip_x2 < g->hd_fx[k] + g->hd_w && g->clip_y1 >= g->hd_fy[k] && g->clip_y2 < g->hd_fy[k] + g->hd_h) return k;
+    return -1;
+}
+static void hd_register(gpu_t* g, int x, int y, int w, int h) {                 /* a framebuffer rectangle (from PutDrawEnv / PutDispEnv) */
+    int k;
+    if (g->hd_s < 2 || !g->hd[0]) return;
+    if (w <= 0 || h <= 0 || w > g->hd_w || h > g->hd_h) return;
+    for (k = 0; k < g->hd_n; k++) if (g->hd_fx[k] == x && g->hd_fy[k] == y) return;
+    if (g->hd_n >= 2) return;
+    g->hd_fx[g->hd_n] = x; g->hd_fy[g->hd_n] = y; g->hd_n++;
+}
+static void hd_put(gpu_t* g, int k, int hx, int hy, unsigned col, int semi) {
+    unsigned short* p = &g->hd[k][(unsigned)hy * (unsigned)(g->hd_w * g->hd_s) + (unsigned)hx];
+    if (semi) col = blend(*p, col, g->abr);
+    *p = (unsigned short)(col & 0x7fffu);
+}
+static void hd_block(gpu_t* g, int x, int y, unsigned col, int semi) {          /* one 1x pixel (already inside the drawing area) as an hd_s x hd_s block */
+    int k = hd_index(g), S = g->hd_s, i, j, bx, by;
+    if (k < 0 || g->hd_skip) return;
+    bx = (x - g->hd_fx[k]) * S; by = (y - g->hd_fy[k]) * S;
+    if (bx < 0 || by < 0 || bx + S > g->hd_w * S || by + S > g->hd_h * S) return;
+    for (j = 0; j < S; j++) for (i = 0; i < S; i++) hd_put(g, k, bx + i, by + j, col, semi);
+}
+static void hd_sync_rect(gpu_t* g, int x, int y, int w, int h) {                /* the framebuffers' canvases <- this VRAM rectangle (nearest upscale) */
+    int k, S = g->hd_s, xx, yy, i, j;
+    if (S < 2 || !g->hd[0]) return;
+    for (k = 0; k < g->hd_n; k++)
+        for (yy = 0; yy < h; yy++) {
+            int py = y + yy;
+            if (py < g->hd_fy[k] || py >= g->hd_fy[k] + g->hd_h) continue;
+            for (xx = 0; xx < w; xx++) {
+                int px = x + xx;
+                unsigned short c;
+                if (px < g->hd_fx[k] || px >= g->hd_fx[k] + g->hd_w) continue;
+                c = g->vram[(py & 511) * GPU_VRAM_W + (px & 1023)] & 0x7fffu;
+                for (j = 0; j < S; j++) for (i = 0; i < S; i++) g->hd[k][(unsigned)((py - g->hd_fy[k]) * S + j) * (unsigned)(g->hd_w * S) + (unsigned)((px - g->hd_fx[k]) * S + i)] = c;
+            }
+        }
+}
+
+void gpu_hd_resync(gpu_t* g) {                                                  /* the canvases <- the whole VRAM (after a saved state was loaded) */
+    if (g->hd_s > 1 && g->hd_n) hd_sync_rect(g, 0, 0, GPU_VRAM_W, GPU_VRAM_H);
+}
 
 /* texture fetch: the texel at (u, v) of the current texture page (0 = transparent), CLUT at (clut_x * 16, clut_y) */
 static unsigned fetch(gpu_t* g, int u, int v, int clut_x, int clut_y) {
@@ -87,15 +142,18 @@ static void textured_pixel(gpu_t* g, int x, int y, unsigned texel, int cr, int c
 typedef struct { int x, y, r, g, b, u, v; } vtx_t;
 #define EDGE(p1, p2, px, py) (((p2).x - (p1).x) * ((py) - (p1).y) - ((p2).y - (p1).y) * ((px) - (p1).x))
 static int top_left(const vtx_t* p1, const vtx_t* p2) { return (p1->y == p2->y && p2->x > p1->x) || p2->y < p1->y; }   /* clockwise (y down) triangle: top edge runs right, left edge runs up */
+static void hd_tri(gpu_t* g, vtx_t a, vtx_t b, vtx_t c, int textured, int semi, int raw, int clut_x, int clut_y);
 static void raster_tri(gpu_t* g, vtx_t a, vtx_t b, vtx_t c, int textured, int shaded, int semi, int raw, int clut_x, int clut_y) {
     int area, minx, maxx, miny, maxy, x, y, bias_a, bias_b, bias_c;
     (void)shaded;
+    if (g->hd_s > 1) hd_tri(g, a, b, c, textured, semi, raw, clut_x, clut_y);
+    g->hd_skip = 1;
     area = EDGE(a, b, c.x, c.y);
-    if (area == 0) return;
+    if (area == 0) { g->hd_skip = 0; return; }
     if (area < 0) { vtx_t t = b; b = c; c = t; area = -area; }
     minx = imin(a.x, imin(b.x, c.x)); maxx = imax(a.x, imax(b.x, c.x));
     miny = imin(a.y, imin(b.y, c.y)); maxy = imax(a.y, imax(b.y, c.y));
-    if (maxx - minx > 1023 || maxy - miny > 511) return;                       /* the GPU drops polygons that are too large */
+    if (maxx - minx > 1023 || maxy - miny > 511) { g->hd_skip = 0; return; }                       /* the GPU drops polygons that are too large */
     minx = imax(minx, g->clip_x1); maxx = imin(maxx, g->clip_x2);
     miny = imax(miny, g->clip_y1); maxy = imin(maxy, g->clip_y2);
     bias_c = top_left(&a, &b) ? 0 : 1; bias_a = top_left(&b, &c) ? 0 : 1; bias_b = top_left(&c, &a) ? 0 : 1;
@@ -109,6 +167,50 @@ static void raster_tri(gpu_t* g, vtx_t a, vtx_t b, vtx_t c, int textured, int sh
                 int u = (wa * a.u + wb * b.u + wc * c.u) / area, v = (wa * a.v + wb * b.v + wc * c.v) / area;
                 textured_pixel(g, x, y, fetch(g, u, v, clut_x, clut_y), r, gg, bb, raw, semi);
             } else put_pixel(g, x, y, rgb555((unsigned)r, (unsigned)gg, (unsigned)bb), semi);
+        }
+    g->hd_skip = 0;
+}
+
+
+/* the same triangle on the HD grid: vertices scaled by hd_s, edge functions in 64 bits, the texel / colour chosen per HD pixel (sampled at the pixel's corner like the 1x path).
+ * The 64-bit quotients go through a double (exact for these magnitudes; the driver links without libgcc, so no __divdi3). */
+#define HD_DIV(n, d) ((int)((double)(n) / (double)(d)))
+static void hd_tri(gpu_t* g, vtx_t a, vtx_t b, vtx_t c, int textured, int semi, int raw, int clut_x, int clut_y) {
+    int k = hd_index(g), S = g->hd_s, minx, maxx, miny, maxy, hx, hy, bias_a, bias_b, bias_c, cx1, cx2, cy1, cy2;
+    long long area;
+    if (k < 0) return;
+    a.x = (a.x - g->hd_fx[k]) * S; a.y = (a.y - g->hd_fy[k]) * S;
+    b.x = (b.x - g->hd_fx[k]) * S; b.y = (b.y - g->hd_fy[k]) * S;
+    c.x = (c.x - g->hd_fx[k]) * S; c.y = (c.y - g->hd_fy[k]) * S;
+    area = (long long)(b.x - a.x) * (c.y - a.y) - (long long)(b.y - a.y) * (c.x - a.x);
+    if (area == 0) return;
+    if (area < 0) { vtx_t t = b; b = c; c = t; area = -area; }
+    minx = imin(a.x, imin(b.x, c.x)); maxx = imax(a.x, imax(b.x, c.x));
+    miny = imin(a.y, imin(b.y, c.y)); maxy = imax(a.y, imax(b.y, c.y));
+    cx1 = (g->clip_x1 - g->hd_fx[k]) * S; cx2 = (g->clip_x2 + 1 - g->hd_fx[k]) * S - 1;
+    cy1 = (g->clip_y1 - g->hd_fy[k]) * S; cy2 = (g->clip_y2 + 1 - g->hd_fy[k]) * S - 1;
+    minx = imax(minx, cx1); maxx = imin(maxx, cx2); miny = imax(miny, cy1); maxy = imin(maxy, cy2);
+    bias_c = top_left(&a, &b) ? 0 : 1; bias_a = top_left(&b, &c) ? 0 : 1; bias_b = top_left(&c, &a) ? 0 : 1;
+    for (hy = miny; hy <= maxy; hy++)
+        for (hx = minx; hx <= maxx; hx++) {
+            long long wc = (long long)(b.x - a.x) * (hy - a.y) - (long long)(b.y - a.y) * (hx - a.x);
+            long long wa = (long long)(c.x - b.x) * (hy - b.y) - (long long)(c.y - b.y) * (hx - b.x);
+            long long wb = (long long)(a.x - c.x) * (hy - c.y) - (long long)(a.y - c.y) * (hx - c.x);
+            int r, gg, bb;
+            unsigned col;
+            if (wa < bias_a || wb < bias_b || wc < bias_c) continue;
+            r = HD_DIV(wa * a.r + wb * b.r + wc * c.r, area); gg = HD_DIV(wa * a.g + wb * b.g + wc * c.g, area); bb = HD_DIV(wa * a.b + wb * b.b + wc * c.b, area);
+            if (textured) {
+                int u = HD_DIV(wa * a.u + wb * b.u + wc * c.u, area), v = HD_DIV(wa * a.v + wb * b.v + wc * c.v, area);
+                unsigned texel = fetch(g, u, v, clut_x, clut_y);
+                if (texel == 0) continue;
+                if (raw) col = texel & 0x7fffu;
+                else {
+                    int tr = (int)((texel & 31) << 3) * r >> 7, tg = (int)(((texel >> 5) & 31) << 3) * gg >> 7, tb = (int)(((texel >> 10) & 31) << 3) * bb >> 7;
+                    col = rgb555((unsigned)(tr > 255 ? 255 : tr), (unsigned)(tg > 255 ? 255 : tg), (unsigned)(tb > 255 ? 255 : tb));
+                }
+                hd_put(g, k, hx, hy, col, semi && (texel & 0x8000u));
+            } else hd_put(g, k, hx, hy, rgb555((unsigned)r, (unsigned)gg, (unsigned)bb), semi);
         }
 }
 
@@ -142,6 +244,7 @@ static void fill_rect(gpu_t* g, unsigned xy, unsigned wh, unsigned color24) {   
     int x = (int)(xy & 0x3f0u), y = (int)((xy >> 16) & 0x1ffu), w = (int)(((wh & 0x3ffu) + 0xfu) & ~0xfu), h = (int)((wh >> 16) & 0x1ffu), xx, yy;
     unsigned col = rgb555(color24 & 255u, (color24 >> 8) & 255u, (color24 >> 16) & 255u);
     for (yy = 0; yy < h; yy++) for (xx = 0; xx < w; xx++) { g->vram[((y + yy) & 511) * GPU_VRAM_W + ((x + xx) & 1023)] = (unsigned short)col; g->rd[((y + yy) & 511) * GPU_VRAM_W + ((x + xx) & 1023)] = 0; WATCH(g, x + xx, y + yy, col); }
+    if (g->hd_s > 1) hd_sync_rect(g, x, y, w, h);
 }
 
 /* ------------------------------------------------------------------------------------------------ GP0 command stream */
@@ -232,6 +335,7 @@ static unsigned gp0_command(gpu_t* g, const unsigned* w, unsigned n) {
                 g->vram[((dy + yy) & 511) * GPU_VRAM_W + ((dx + xx) & 1023)] = g->vram[((sy + yy) & 511) * GPU_VRAM_W + ((sx + xx) & 1023)];
                 g->rd[((dy + yy) & 511) * GPU_VRAM_W + ((dx + xx) & 1023)] = g->rd[((sy + yy) & 511) * GPU_VRAM_W + ((sx + xx) & 1023)];      /* data movement: the copy is as "read" as its source */
             }
+            if (g->hd_s > 1) hd_sync_rect(g, dx, dy, ww, hh);
             return 4;
         }
         return n;
@@ -279,6 +383,7 @@ static void load_image(hle_t* h, unsigned rect, unsigned data) {
             g->rd[((y + yy) & 511) * GPU_VRAM_W + ((x + xx) & 1023)] = 0;
             WATCH(g, x + xx, y + yy, c);
         }
+    if (g->hd_s > 1) hd_sync_rect(g, x, y, w, hh);
 }
 static void store_image(hle_t* h, unsigned rect, unsigned data) {
     gpu_t* g = h->gpu;
@@ -307,11 +412,13 @@ int gpu_hle_call(hle_t* h, const char* n, unsigned a0, unsigned a1, unsigned a2,
         (void)tmp;
         g_op = "MoveImage"; g->n_moveimage++;
         for (yy = 0; yy < hh; yy++) for (xx = 0; xx < w; xx++) { g->vram[(((int)a2 + yy) & 511) * GPU_VRAM_W + (((int)a1 + xx) & 1023)] = g->vram[((sy + yy) & 511) * GPU_VRAM_W + ((sx + xx) & 1023)]; g->rd[(((int)a2 + yy) & 511) * GPU_VRAM_W + (((int)a1 + xx) & 1023)] = g->rd[((sy + yy) & 511) * GPU_VRAM_W + ((sx + xx) & 1023)]; WATCH(g, (int)a1 + xx, (int)a2 + yy, g->vram[(((int)a2 + yy) & 511) * GPU_VRAM_W + (((int)a1 + xx) & 1023)]); }
+        if (g->hd_s > 1) hd_sync_rect(g, (int)a1, (int)a2, w, hh);
         return 1;
     }
     if (streq(n, "ClearImage")) { g->n_clearimage++; g_op = "ClearImage"; fill_rect(g, (unsigned)(rd16s(h, a0) & 0xffff) | ((unsigned)rd16s(h, a0 + 2) << 16), (unsigned)(rd16s(h, a0 + 4) & 0xffff) | ((unsigned)rd16s(h, a0 + 6) << 16), (a1 & 255u) | ((a2 & 255u) << 8) | ((a3 & 255u) << 16)); return 1; }
     if (streq(n, "PutDispEnv")) {
         g->disp_x = rd16s(h, a0); g->disp_y = rd16s(h, a0 + 2); g->disp_w = rd16s(h, a0 + 4); g->disp_h = rd16s(h, a0 + 6);
+        hd_register(g, g->disp_x, g->disp_y, g->disp_w, g->disp_h);
         { unsigned q = g->n_disp++ & 7u; g->disp_hist[q][0] = g->disp_x; g->disp_hist[q][1] = g->disp_y; g->disp_hist[q][2] = g->disp_w; g->disp_hist[q][3] = g->disp_h; }
         g->disp_rgb24 = h->p.r8(h->p.ctx, a0 + 17) & 1;
         return 1;
@@ -322,6 +429,7 @@ int gpu_hle_call(hle_t* h, const char* n, unsigned a0, unsigned a1, unsigned a2,
          * or masked -128 would send every pixel at negative coordinates into the texture pages at the right edge of the VRAM */
         g->clip_x1 = cx < 0 ? 0 : (cx > 1023 ? 1023 : cx); g->clip_y1 = cy < 0 ? 0 : (cy > 511 ? 511 : cy);
         g->clip_x2 = cx + cw - 1 < 0 ? 0 : (cx + cw - 1 > 1023 ? 1023 : cx + cw - 1); g->clip_y2 = cy + ch - 1 < 0 ? 0 : (cy + ch - 1 > 511 ? 511 : cy + ch - 1);
+        hd_register(g, g->clip_x1, g->clip_y1, g->clip_x2 - g->clip_x1 + 1, g->clip_y2 - g->clip_y1 + 1);
         g->ofs_x = rd16s(h, a0 + 8); g->ofs_y = rd16s(h, a0 + 10);
         { unsigned q = g->n_env++ & 7u; g->env_hist[q][0] = cx; g->env_hist[q][1] = cy; g->env_hist[q][2] = cw; g->env_hist[q][3] = ch; g->env_hist[q][4] = g->ofs_x; g->env_hist[q][5] = g->ofs_y;
           g->env_hist[q][6] = (int)(h->p.r8(h->p.ctx, a0 + 20) | (h->p.r8(h->p.ctx, a0 + 21) << 8)); g->env_hist[q][7] = (int)h->p.r8(h->p.ctx, a0 + 24); g->env_hist[q][8] = (int)g->cur_frame; }
@@ -381,4 +489,20 @@ void gpu_texpage_rgb(const gpu_t* g, int tp_x, int tp_y, int mode, int clut_x, i
                 p[0] = (unsigned char)((r << 3) | (r >> 2)); p[1] = (unsigned char)((gg << 3) | (gg >> 2)); p[2] = (unsigned char)((b << 3) | (b >> 2));
             }
         }
+}
+
+int gpu_display_hd_rgb(const gpu_t* g, unsigned char* out, int* w, int* h) {
+    int k, S = g->hd_s, x, y, ww, hh;
+    if (S < 2) return 0;
+    for (k = 0; k < g->hd_n; k++) if (g->hd_fx[k] == g->disp_x && g->hd_fy[k] == g->disp_y) break;
+    if (k >= g->hd_n) return 0;
+    ww = (g->disp_w > 0 && g->disp_w <= g->hd_w ? g->disp_w : g->hd_w) * S; hh = (g->disp_h > 0 && g->disp_h <= g->hd_h ? g->disp_h : g->hd_h) * S;
+    *w = ww; *h = hh;
+    for (y = 0; y < hh; y++)
+        for (x = 0; x < ww; x++) {
+            unsigned c = g->disp_on ? g->hd[k][(unsigned)y * (unsigned)(g->hd_w * S) + (unsigned)x] : 0u, r = c & 31, gg = (c >> 5) & 31, b = (c >> 10) & 31;
+            unsigned char* p = out + 3 * (y * ww + x);
+            p[0] = (unsigned char)((r << 3) | (r >> 2)); p[1] = (unsigned char)((gg << 3) | (gg >> 2)); p[2] = (unsigned char)((b << 3) | (b >> 2));
+        }
+    return 1;
 }

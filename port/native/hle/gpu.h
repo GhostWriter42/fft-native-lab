@@ -20,6 +20,10 @@ typedef struct gpu {
     int mask_set, mask_check;
     /* display environment */
     int disp_x, disp_y, disp_w, disp_h, disp_on, disp_rgb24;
+    /* optional HD canvases: the two display buffers re-rendered at hd_s times the resolution (polygons rasterised at the finer grid, sprites / tiles / lines / fills as
+     * hd_s x hd_s blocks per VRAM pixel); hd[k] points to hd_w * hd_h * hd_s^2 RGB555 pixels supplied by the driver; hd_fx/hd_fy = the framebuffer's VRAM origin */
+    int hd_s, hd_n, hd_fx[2], hd_fy[2], hd_w, hd_h, hd_skip;
+    unsigned short* hd[2];
     /* statistics */
     unsigned n_prims, n_tris, n_rects, n_lines, n_unknown, n_tex_px[3], n_px, n_cmd[256], n_loadimage, n_moveimage, n_storeimage, n_clearimage;
     /* debugging aid: the last DRAWENV / DISPENV the game set (clip x y w h, offset x y, tpage, isbg | display x y w h) */
@@ -45,6 +49,10 @@ void gpu_display_rgb(const gpu_t* g, unsigned char* out, int* w, int* h);
 /* 32-bit hash of the whole VRAM / of the display area only */
 /* one 256x256 texture page decoded through a CLUT (mode 0 = 4-bit, 1 = 8-bit, 2 = 15-bit) as 8-bit RGB: for looking at what the game has uploaded */
 void gpu_texpage_rgb(const gpu_t* g, int tp_x, int tp_y, int mode, int clut_x, int clut_y, unsigned char* out);
+/* the display buffer's HD canvas as 8-bit RGB (size hd_s * disp_w x hd_s * disp_h); returns 0 when there is none */
+int gpu_display_hd_rgb(const gpu_t* g, unsigned char* out, int* w, int* h);
+/* re-render the HD canvases from the 1x VRAM (nearest upscale): after the machine state was replaced */
+void gpu_hd_resync(gpu_t* g);
 unsigned gpu_hash_vram(const gpu_t* g);
 unsigned gpu_hash_display(const gpu_t* g);
 #endif

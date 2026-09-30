@@ -40,7 +40,8 @@ static long sys4(long n, long a, long b, long c, long d) {
     __asm__ volatile("int $0x80" : "=a"(r) : "0"(n), "b"(a), "c"(b), "d"(c), "S"(d) : "memory");
     return r;
 }
-static void out(const char* s) { long n = 0; while (s[n]) n++; sys3(4, 1, (long)s, n); }
+static int g_out_fd = 1;                                                     /* play mode: stdout carries the frames, the log goes to stderr */
+static void out(const char* s) { long n = 0; while (s[n]) n++; sys3(4, g_out_fd, (long)s, n); }
 static void outnum(long v) {
     char buf[24]; int i = 23, neg = v < 0; buf[23] = 0;
     if (neg) v = -v;
@@ -54,7 +55,8 @@ static void outhex(unsigned v) {
     buf[8] = 0; out(buf);
 }
 struct old_mmap_args { long addr, len, prot, flags, fd, off; };
-static int map_fixed(unsigned addr, unsigned len) { struct old_mmap_args a; a.addr = (long)addr; a.len = (long)len; a.prot = 7; a.flags = 0x32; a.fd = -1; a.off = 0; return sys3(90, (long)&a, 0, 0) == (long)addr; }
+/* anonymous RWX pages at a fixed address; MAP_FIXED_NOREPLACE (0x100000): an overlap with the program image or another mapping is an error, never silent corruption */
+static int map_fixed(unsigned addr, unsigned len) { struct old_mmap_args a; a.addr = (long)addr; a.len = (long)len; a.prot = 7; a.flags = 0x100022; a.fd = -1; a.off = 0; return sys3(90, (long)&a, 0, 0) == (long)addr; }
 static long load_file(const char* path, unsigned char* dst) {
     long fd = sys3(5, (long)path, 0, 0), total = 0, n;
     if (fd < 0) return -1;
@@ -139,7 +141,7 @@ static void build_ranges(void) {
 /* Function coverage: every trampoline jumps to a 16-byte thunk `inc dword [counter]; jmp native` (every call in the PS1-address scheme goes through the trampoline at the
  * function's PS1 address, so the counters see every call). write_coverage() lists the functions that ran, per module, into /cov/hits.txt when that directory is mounted. */
 #define COV_MAX 8192
-#define THUNK_BASE 0x0a000000u
+#define THUNK_BASE 0x10000000u                                                    /* must stay above the program image (its .bss ends at ~0x0aa00000 and grows with the GPU buffers); _start checks */
 #define THUNK_BYTES (16u * COV_MAX)
 static unsigned g_cov[COV_MAX];
 static unsigned fn_id(int mod, int i) { int m; unsigned id = 0; for (m = 0; m < mod; m++) id += (unsigned)g_modules[m].nfns; return id + (unsigned)i; }
@@ -169,13 +171,17 @@ static unsigned thunk_target(int mod, int i, unsigned native) {
     t[6] = 0xe9; *(unsigned*)(t + 7) = native - ((unsigned)t + 11u);                       /* jmp native */
     return (unsigned)t;
 }
-/* x86 `jmp` trampolines at the PS1 addresses of a module's natively compiled functions; returns how many were installed */
+/* x86 `jmp` trampolines at the PS1 addresses of a module's natively compiled functions; returns how many were installed. The five code bytes each trampoline replaces are kept
+ * (native-only mode has no interpreter RAM to take them back from when the module is evicted). */
+static unsigned char g_saved5[COV_MAX][5];
 static int install_module(int mod) {
     int i, n = 0;
     for (i = 0; i < g_modules[mod].nfns; i++) {
         const struct mfn* f = &g_modules[mod].fns[i];
         if (f->native && f->size >= 5) {
             unsigned char* p = (unsigned char*)f->addr;
+            unsigned id = fn_id(mod, i);
+            if (id < COV_MAX) { int k; for (k = 0; k < 5; k++) g_saved5[id][k] = p[k]; }
             p[0] = 0xe9; *(unsigned*)(p + 1) = thunk_target(mod, i, (unsigned)f->native) - (f->addr + 5);
             n++;
         }
@@ -402,16 +408,24 @@ static gpu_t g_gpu_orig, g_gpu_native;
 static int g_gpu_on, g_shotscale = 1, g_gpu_watch, g_gpu_watch_x, g_gpu_watch_y;
 static unsigned g_texdump[6], g_texdump_n;                                      /* run.cfg "texdump FRAME TPX TPY MODE CLUTX CLUTY": write that texture page, decoded, as /shots/tex<frame>.png */
 static unsigned g_skipcmd[4], g_nskipcmd;                                       /* run.cfg "skipcmd 0x26": do not draw polygons with that command byte (rasteriser debugging) */
+static int g_play, g_native_only;                                               /* run.cfg "play 1": interactive -- every frame goes to stdout, the controller comes from stdin (play.py); "play 2": the same with the native game alone (no original, no comparison); "nativeonly 1": the native game alone, scripted */
+static unsigned g_play_pad;
+static int g_hd_s;                                                              /* run.cfg "hd S": the native machine's GPU also renders the display buffers at S times the resolution (2..4) */
+static unsigned short g_hd_canvas[2][320 * 240 * 16];
 static unsigned g_polydump;                                                     /* run.cfg "polydump FRAME": print the tall textured polygons of that frame (debugging the rasteriser) */
 static unsigned g_shot_list[256], g_shot_every, g_shot_from = 1, g_shot_count;
 static int g_nshot_list;
+static unsigned g_snap_save_frame;                                              /* run.cfg "snapsave FRAME PATH": write the machine state after that frame; "snapload PATH": start from a state written earlier */
+static char g_snap_save_path[128], g_snap_load_path[128];
+static unsigned g_det_frame, g_det_m, g_hash_every;                             /* run.cfg "detcheck FRAME M": determinism self-test; "hashevery N": print a hash of the game state every N frames */
+static int g_play_cmd;                                                          /* play mode: the viewer's command for the end of this frame (1..8 save slot, 0x11..0x18 load slot) */
 static unsigned g_crc_table[256];
 static void crc_init(void) {
     unsigned n, k, c;
     for (n = 0; n < 256; n++) { c = n; for (k = 0; k < 8; k++) c = c & 1 ? 0xedb88320u ^ (c >> 1) : c >> 1; g_crc_table[n] = c; }
 }
 static unsigned crc_update(unsigned crc, const unsigned char* p, unsigned n) { while (n--) crc = g_crc_table[(crc ^ *p++) & 255u] ^ (crc >> 8); return crc; }
-static unsigned char g_png_raw[3 << 20], g_png_out[3 << 20 | 1 << 19];
+static unsigned char g_png_raw[6 << 20], g_png_out[6 << 20 | 1 << 19];
 static unsigned png_len;
 static void png_put(const unsigned char* p, unsigned n) { while (n--) g_png_out[png_len++] = *p++; }
 static void png_be32(unsigned v) { unsigned char b[4]; b[0] = (unsigned char)(v >> 24); b[1] = (unsigned char)(v >> 16); b[2] = (unsigned char)(v >> 8); b[3] = (unsigned char)v; png_put(b, 4); }
@@ -476,6 +490,25 @@ static unsigned parse_num(const char** pp) {
     *pp = p;
     return v;
 }
+static void parse_path(const char** pp, char* dst, int max) {
+    const char* p = *pp;
+    int n = 0;
+    while (*p == ' ' || *p == '\t') p++;
+    while (*p && *p != '\n' && *p != '\r' && *p != ' ' && n < max - 1) dst[n++] = *p++;
+    dst[n] = 0;
+    *pp = p;
+}
+/* every run-configuration variable back to its default (a state loaded from a snapshot overwrote them with the values of the run that saved it; the configuration is read again after a load) */
+static void cfg_reset(void) {
+    g_frames = MAX_FRAMES; g_npadrt = 0; g_npokes = 0;
+    g_natwatch = 0; g_natwatch_from = 1;
+    g_gpu_on = 0; g_shotscale = 1; g_gpu_watch = 0;
+    g_texdump_n = 0; g_nskipcmd = 0; g_play = 0; g_native_only = 0; g_hd_s = 0; g_polydump = 0;
+    g_shot_every = 0; g_shot_from = 1; g_nshot_list = 0;
+    g_snap_save_frame = 0; g_snap_save_path[0] = 0; g_snap_load_path[0] = 0;
+    g_det_frame = g_det_m = g_hash_every = 0;
+    g_out_fd = 1;
+}
 static void load_run_config(void) {
     static char buf[1 << 21];
     long n = load_file("/run.cfg", (unsigned char*)buf);
@@ -484,11 +517,18 @@ static void load_run_config(void) {
     buf[n] = 0;
     while (*p) {
         if (p[0] == 'f' && p[1] == 'r') { p += 6; g_frames = parse_num(&p); }                 /* frames N */
+        else if (p[0] == 'd' && p[1] == 'e') { p += 8; g_det_frame = parse_num(&p); g_det_m = parse_num(&p); if (g_det_m > 1800) g_det_m = 1800; }                                          /* detcheck FRAME M */
+        else if (p[0] == 'h' && p[1] == 'a') { p += 9; g_hash_every = parse_num(&p); }                                                                                                     /* hashevery N */
+        else if (p[0] == 's' && p[1] == 'n' && p[4] == 's') { p += 8; g_snap_save_frame = parse_num(&p); parse_path(&p, g_snap_save_path, (int)sizeof g_snap_save_path); }     /* snapsave FRAME PATH */
+        else if (p[0] == 's' && p[1] == 'n' && p[4] == 'l') { p += 8; parse_path(&p, g_snap_load_path, (int)sizeof g_snap_load_path); }                                    /* snapload PATH */
         else if (p[0] == 'p' && p[1] == 'o' && p[2] == 'k') {                                     /* pokewhen CADDR CVAL ADDR VAL */
             if (g_npokes < 64) { p += 9; g_pokes[g_npokes].caddr = parse_num(&p); g_pokes[g_npokes].cval = parse_num(&p); g_pokes[g_npokes].addr = parse_num(&p); g_pokes[g_npokes].val = parse_num(&p); g_pokes[g_npokes].repeat = parse_num(&p); g_pokes[g_npokes].done = 0; g_npokes++; }
         }
         else if (p[0] == 's' && p[1] == 'k') { p += 7; if (g_nskipcmd < 4) g_skipcmd[g_nskipcmd++] = parse_num(&p); }                 /* skipcmd 0x26 */
         else if (p[0] == 't' && p[1] == 'e' && p[2] == 'x') { int q; p += 7; for (q = 0; q < 6; q++) g_texdump[q] = parse_num(&p); g_texdump_n = 1; }      /* texdump FRAME TPX TPY MODE CLUTX CLUTY */
+        else if (p[0] == 'p' && p[1] == 'l' && p[2] == 'a') { p += 5; g_play = (int)parse_num(&p); if (g_play) { g_out_fd = 2; g_frames = 0x7fffffffu; g_gpu_on = 1; g_native_only = g_play == 2; } }     /* play 1 */
+        else if (p[0] == 'n' && p[1] == 'a' && p[3] == 'i') { p += 10; g_native_only = (int)parse_num(&p); }                                                                                 /* nativeonly 1 */
+        else if (p[0] == 'h' && p[1] == 'd') { p += 3; g_hd_s = (int)parse_num(&p); if (g_hd_s > 4) g_hd_s = 4; if (g_hd_s < 2) g_hd_s = 0; }      /* hd S */
         else if (p[0] == 'p' && p[1] == 'o' && p[4] == 'd') { p += 8; g_polydump = parse_num(&p); }                              /* polydump FRAME */
         else if (p[0] == 'g' && p[1] == 'p' && p[3] == 'w') { p += 8; g_gpu_watch_x = (int)parse_num(&p); g_gpu_watch_y = (int)parse_num(&p); g_gpu_watch = 1; }   /* gpuwatch X Y */
         else if (p[0] == 'g' && p[1] == 'p') { p += 3; g_gpu_on = (int)parse_num(&p); }                                            /* gpu 1 */
@@ -508,6 +548,7 @@ static void load_run_config(void) {
 static unsigned pad_at(unsigned frame) {
     unsigned mask = 0;
     int i;
+    if (g_play) return g_play_pad;
     if (g_npadrt) { for (i = 0; i < g_npadrt && g_padrt[i][0] <= frame; i++) mask = g_padrt[i][1]; return mask; }
     for (i = 0; g_pad_script[i][0] != 0xffffffffu; i++) if (g_pad_script[i][0] <= frame) mask = g_pad_script[i][1];
     return mask;
@@ -624,8 +665,8 @@ static void remove_hle_hooks(int mod) {
 /* --------------------------------------------------------------------------------- machine B: the native game */
 hle_t g_hle_native;
 extern void native_main(void);
-static void* g_driver_esp;
-static void* g_game_esp;
+void* g_driver_esp;                                                        /* (not static: ls_yield below reads them by name) */
+void* g_game_esp;
 static int g_native_dead;
 void ls_switch(void** save_esp, void* new_esp);
 __asm__(".text\n"
@@ -644,10 +685,27 @@ __asm__(".text\n"
         "    popl %ebx\n"
         "    popl %ebp\n"
         "    ret\n");
+/* game -> driver without arguments: a call to ls_switch(&g_game_esp, g_driver_esp) would leave the driver's stack pointer (a host address, different in every process) as a dead argument
+ * slot on the game's stack, i.e. in memory that the state hash and the snapshots cover; this stub takes both values from the globals itself */
+void ls_yield(void);
+__asm__(".text\n"
+        ".globl ls_yield\n"
+        "ls_yield:\n"
+        "    pushl %ebp\n"
+        "    pushl %ebx\n"
+        "    pushl %esi\n"
+        "    pushl %edi\n"
+        "    movl %esp, g_game_esp\n"
+        "    movl g_driver_esp, %esp\n"
+        "    popl %edi\n"
+        "    popl %esi\n"
+        "    popl %ebx\n"
+        "    popl %ebp\n"
+        "    ret\n");
 static void game_entry(void) {
     native_main();
     g_native_dead = 1;
-    for (;;) ls_switch(&g_game_esp, g_driver_esp);
+    for (;;) ls_yield();
 }
 /* The native threads' stacks (replacements/battle_thread.c, world_thread.c) sit in a window above the 2 MiB of RAM, see thread_window.h */
 static unsigned nb_r8(void* c, unsigned a) { (void)c; return *(volatile unsigned char*)a; }
@@ -657,7 +715,7 @@ static void nb_wb(void* c, unsigned a, const unsigned char* s, unsigned n) { uns
 void ls_native_tick(void) { hle_tick(&g_hle_native); }
 extern unsigned g_ls_ignore_enter;
 static unsigned nb_call(void* c, unsigned addr, unsigned a0, unsigned a1) { (void)c; g_ls_ignore_enter = 1; return ((unsigned (*)(unsigned, unsigned))addr)(a0, a1); }
-static void nb_frame(void* c) { (void)c; ls_switch(&g_game_esp, g_driver_esp); }
+static void nb_frame(void* c) { (void)c; ls_yield(); }
 static void start_native_game(void) {
     /* the game's stack lives in the RAM image, at the top like the console's: locals whose addresses go into GPU ordering tables / RAM structures keep valid 24-bit PS1 addresses */
     unsigned* top = (unsigned*)(MAIN_STACK_WINDOW + MAIN_STACK_BYTES);
@@ -1113,10 +1171,36 @@ static void shot_path(char* dst, const char* tag, int frame) {
 static void write_shot(const gpu_t* g, const char* tag, int frame) {
     static unsigned char rgb[GPU_VRAM_W * GPU_VRAM_H * 3];
     char path[64]; int w, h;
+    static unsigned char hdrgb[1280 * 960 * 3];
     crc_init();
     gpu_display_rgb(g, rgb, &w, &h);
     shot_path(path, tag, frame);
     if (!png_write(path, rgb, w, h, g_shotscale)) { out("  could not write "); out(path); out("\n"); }
+    if (g->hd_s > 1 && gpu_display_hd_rgb(g, hdrgb, &w, &h)) {                   /* the HD canvas of the display buffer, as h<tag><frame>.png */
+        char hpath[64]; int i = 0, k;
+        const char* pre = "/shots/h", *t = tag;
+        while (*pre) hpath[i++] = *pre++;
+        while (*t) hpath[i++] = *t++;
+        for (k = 100000; k >= 1; k /= 10) hpath[i++] = (char)('0' + (frame / k) % 10);
+        hpath[i++] = '.'; hpath[i++] = 'p'; hpath[i++] = 'n'; hpath[i++] = 'g'; hpath[i] = 0;
+        if (!png_write(hpath, hdrgb, w, h, 1)) { out("  could not write "); out(hpath); out("\n"); }
+    }
+}
+/* play mode: send the native machine's display buffer (the HD canvas when there is one) to stdout as 'F' 'R' w(u16) h(u16) frame(u16) + w*h*3 RGB bytes, then wait for the
+ * viewer's answer: three bytes = the controller state of the next frame (16 bits, little endian) and a command for the end of this frame (0 none, 1..8 save the state to slot N,
+ * 0x11..0x18 load it). The viewer paces the game (it answers when it wants the next frame). */
+static void play_frame(int frame) {
+    static unsigned char buf[8 + 1280 * 960 * 3];
+    unsigned char ans[3];
+    int w = 0, h = 0, total, off = 0;
+    if (!(g_gpu_native.hd_s > 1 && gpu_display_hd_rgb(&g_gpu_native, buf + 8, &w, &h))) gpu_display_rgb(&g_gpu_native, buf + 8, &w, &h);
+    buf[0] = 'F'; buf[1] = 'R'; buf[2] = (unsigned char)w; buf[3] = (unsigned char)(w >> 8); buf[4] = (unsigned char)h; buf[5] = (unsigned char)(h >> 8); buf[6] = (unsigned char)frame; buf[7] = (unsigned char)(frame >> 8);
+    total = 8 + w * h * 3;
+    while (off < total) { long n = sys3(4, 1, (long)(buf + off), (long)(total - off)); if (n <= 0) sys3(1, 0, 0, 0); off += (int)n; }
+    off = 0;
+    while (off < 3) { long n = sys3(3, 0, (long)(ans + off), (long)(3 - off)); if (n <= 0) { out("the viewer closed the pipe: stopping\n"); sys3(1, 0, 0, 0); } off += (int)n; }
+    g_play_pad = (unsigned)ans[0] | ((unsigned)ans[1] << 8);
+    g_play_cmd = ans[2];
 }
 /* the last (up to 16) writes to the watched VRAM pixel of one machine, oldest first: frame, the SDK call that wrote it with its first two arguments, the value */
 static void print_wlog(const gpu_t* g, const char* who) {
@@ -1192,18 +1276,230 @@ vram_ok:
     }
     return 0;
 }
+/* ------------------------------------------------------------------------------------------------ snapshots (save states) */
+/* The complete machine state is copied into a buffer and back: the program's writable image (.data/.bss: both machines' HLE, GPU, GTE and interpreter state, the module tables, the
+ * driver) plus the mapped areas (PS1 RAM, scratchpad, the thread-stack window that holds the native game's coroutine stacks, the coverage thunks). The game is suspended at a frame
+ * boundary whenever this runs, so nothing else is live (its registers are saved on its own stack, inside the window). All-zero pages are stored as a flag. A snapshot is valid only for
+ * the program binary that wrote it (the header records the image layout); the run configuration is read again after a load (cfg_reset + load_run_config). */
+struct elf32_ehdr { unsigned char ident[16]; unsigned short type, machine; unsigned version, entry, phoff, shoff, flags; unsigned short ehsize, phentsize, phnum, shentsize, shnum, shstrndx; };
+struct elf32_phdr { unsigned type, offset, vaddr, paddr, filesz, memsz, flags, align; };
+extern const char __ehdr_start[];
+extern char _end[];
+static int main_test(void);
+#define SNAP_ARENA 0x30000000u
+#define SNAP_ARENA_BYTES (96u << 20)
+#define SNAP_MAGIC 0x53544646u                                                    /* "FFTS" */
+#define SNAP_VERSION 1u
+struct snap_ctl_f { unsigned char* buf; unsigned len; int mapped, loaded, det_phase, det_frame, det_m, det_idx; unsigned det_hash[1800]; };
+union snap_ctl { struct snap_ctl_f f; unsigned char raw[8192]; };
+static union snap_ctl g_snapctl_u __attribute__((aligned(4096)));                /* two whole pages of their own: the only part of the image a load must not overwrite */
+#define g_snapctl (g_snapctl_u.f)
+static int snap_regions(unsigned reg[][2]) {
+    const struct elf32_ehdr* eh = (const struct elf32_ehdr*)__ehdr_start;
+    const struct elf32_phdr* ph = (const struct elf32_phdr*)(__ehdr_start + eh->phoff);
+    int i, n = 0;
+    for (i = 0; i < eh->phnum && n < 4; i++) if (ph[i].type == 1 && (ph[i].flags & 2u)) { reg[n][0] = ph[i].vaddr; reg[n][1] = ph[i].memsz; n++; }
+    reg[n][0] = 0x80000000u; reg[n][1] = 0x200000u; n++;
+    reg[n][0] = 0x1f800000u; reg[n][1] = 0x1000u; n++;
+    reg[n][0] = THREAD_STACK_WINDOW; reg[n][1] = THREAD_STACK_WINDOW_BYTES; n++;
+    reg[n][0] = THUNK_BASE; reg[n][1] = (THUNK_BYTES + 0xfffu) & ~0xfffu; n++;
+    return n;
+}
+static void snap_copy(void* dst, const void* src, unsigned n) { __asm__ volatile("rep movsb" : "+D"(dst), "+S"(src), "+c"(n) : : "memory"); }
+static void snap_zero(void* dst, unsigned n) { __asm__ volatile("rep stosb" : "+D"(dst), "+c"(n) : "a"(0) : "memory"); }
+static int snap_is_zero(const unsigned char* p, unsigned n) {
+    while (n && ((unsigned)p & 3u)) { if (*p++) return 0; n--; }
+    while (n >= 4) { if (*(const unsigned*)p) return 0; p += 4; n -= 4; }
+    while (n) { if (*p++) return 0; n--; }
+    return 1;
+}
+static void snap_put(unsigned char* b, unsigned* pos, unsigned v) { snap_copy(b + *pos, &v, 4); *pos += 4; }
+static unsigned snap_get(const unsigned char* b, unsigned* pos) { unsigned v; snap_copy(&v, b + *pos, 4); *pos += 4; return v; }
+static int snap_arena(void) {
+    if (g_snapctl.mapped) return 1;
+    if (!map_fixed(SNAP_ARENA, SNAP_ARENA_BYTES)) { out("snapshot: cannot map the snapshot buffer\n"); return 0; }
+    g_snapctl.buf = (unsigned char*)SNAP_ARENA; g_snapctl.mapped = 1;
+    return 1;
+}
+static unsigned snap_serialize(unsigned frame) {                                   /* -> bytes used, 0 when the buffer is too small */
+    unsigned reg[8][2], pos = 0, skip = (unsigned)&g_snapctl_u >> 12, pg, lo, hi, a, z;
+    unsigned char* b = g_snapctl.buf;
+    int n = snap_regions(reg), i;
+    snap_put(b, &pos, SNAP_MAGIC); snap_put(b, &pos, SNAP_VERSION); snap_put(b, &pos, (unsigned)n); snap_put(b, &pos, frame); snap_put(b, &pos, (unsigned)_end); snap_put(b, &pos, (unsigned)main_test);
+    for (i = 0; i < n; i++) { snap_put(b, &pos, reg[i][0]); snap_put(b, &pos, reg[i][1]); }
+    for (i = 0; i < n; i++) {
+        lo = reg[i][0]; hi = lo + reg[i][1];
+        for (pg = lo & ~0xfffu; pg < hi; pg += 4096) {
+            a = pg < lo ? lo : pg; z = pg + 4096 < hi ? pg + 4096 : hi;
+            if (pos + 4097 + 64 > SNAP_ARENA_BYTES) return 0;
+            if ((pg >> 12) - skip < 2u) { b[pos++] = 2; continue; }
+            if (snap_is_zero((const unsigned char*)a, z - a)) { b[pos++] = 0; continue; }
+            b[pos++] = 1; snap_copy(b + pos, (const void*)a, z - a); pos += z - a;
+        }
+    }
+    g_snapctl.len = pos;
+    return pos;
+}
+static int snap_deserialize(unsigned* frame) {                                      /* the buffer -> the machine; 0 when it does not belong to this program */
+    unsigned reg[8][2], pos = 0, pg, lo, hi, a, z, len = g_snapctl.len;
+    const unsigned char* b = g_snapctl.buf;
+    int n = snap_regions(reg), i, fd = g_disc_fd;
+    if (len < 24 || snap_get(b, &pos) != SNAP_MAGIC || snap_get(b, &pos) != SNAP_VERSION || snap_get(b, &pos) != (unsigned)n) return 0;
+    *frame = snap_get(b, &pos);
+    if (snap_get(b, &pos) != (unsigned)_end || snap_get(b, &pos) != (unsigned)main_test) return 0;
+    for (i = 0; i < n; i++) if (snap_get(b, &pos) != reg[i][0] || snap_get(b, &pos) != reg[i][1]) return 0;
+    {   unsigned body = pos;
+        int pass;
+        for (pass = 0; pass < 2; pass++) {                                            /* pass 0 checks that the body is intact (nothing is touched yet), pass 1 applies it */
+            pos = body;
+            for (i = 0; i < n; i++) {
+                lo = reg[i][0]; hi = lo + reg[i][1];
+                for (pg = lo & ~0xfffu; pg < hi; pg += 4096) {
+                    unsigned char flag;
+                    a = pg < lo ? lo : pg; z = pg + 4096 < hi ? pg + 4096 : hi;
+                    if (pos >= len) return 0;
+                    flag = b[pos++];
+                    if (flag > 2) return 0;
+                    if (flag == 1) { if (pos + (z - a) > len) return 0; if (pass) snap_copy((void*)a, b + pos, z - a); pos += z - a; }
+                    else if (flag == 0 && pass) snap_zero((void*)a, z - a);
+                }
+            }
+            if (pos != len) return 0;
+        }
+    }
+    g_disc_fd = fd;                                                                   /* this process's descriptor, not the one of the run that saved the state */
+    return 1;
+}
+static int snap_save_file(const char* path, unsigned frame) {
+    unsigned n, off = 0;
+    long fd;
+    if (!snap_arena()) return 0;
+    n = snap_serialize(frame);
+    if (!n) { out("snapshot: the state does not fit the buffer\n"); return 0; }
+    fd = sys3(5, (long)path, 0x241, 0x1a4);
+    if (fd < 0) { out("snapshot: cannot write "); out(path); out("\n"); return 0; }
+    while (off < n) { long w = sys3(4, fd, (long)(g_snapctl.buf + off), (long)(n - off)); if (w <= 0) break; off += (unsigned)w; }
+    sys3(6, fd, 0, 0);
+    if (off != n) { out("snapshot: short write to "); out(path); out("\n"); return 0; }
+    out("snapshot of frame "); outnum((long)frame); out(" written to "); out(path); out(" ("); outnum((long)(n >> 10)); out(" KiB)\n");
+    return 1;
+}
+static int snap_read_file(const char* path) {                                       /* the file -> the buffer */
+    long fd, n, total = 0;
+    if (!snap_arena()) return 0;
+    fd = sys3(5, (long)path, 0, 0);
+    if (fd < 0) return 0;
+    while ((unsigned)total < SNAP_ARENA_BYTES && (n = sys3(3, fd, (long)(g_snapctl.buf + total), (long)(SNAP_ARENA_BYTES - (unsigned)total > (1u << 20) ? (1u << 20) : SNAP_ARENA_BYTES - (unsigned)total))) > 0) total += n;
+    sys3(6, fd, 0, 0);
+    g_snapctl.len = (unsigned)total;
+    return total > 0;
+}
+static void gpu_apply_config(void) {                                                /* the GPU settings of the run configuration -> both machines' GPU models */
+    unsigned q;
+    if (!g_gpu_on) { hle_i.gpu = 0; g_hle_native.gpu = 0; return; }
+    hle_i.gpu = &g_gpu_orig; g_hle_native.gpu = &g_gpu_native;
+    g_gpu_native.hd_s = g_hd_s; g_gpu_native.hd_w = 320; g_gpu_native.hd_h = 240; g_gpu_native.hd[0] = g_hd_canvas[0]; g_gpu_native.hd[1] = g_hd_canvas[1];
+    g_gpu_orig.n_skip = g_gpu_native.n_skip = g_nskipcmd;
+    for (q = 0; q < g_nskipcmd; q++) g_gpu_orig.skip_cmd[q] = g_gpu_native.skip_cmd[q] = g_skipcmd[q];
+    g_gpu_orig.watch_on = g_gpu_native.watch_on = g_gpu_watch; g_gpu_orig.watch_x = g_gpu_native.watch_x = g_gpu_watch_x; g_gpu_orig.watch_y = g_gpu_native.watch_y = g_gpu_watch_y;
+}
+static int restore_state(const char* path, unsigned* frame) {                       /* a state from a file -> the machine, then the run configuration again */
+    if (!snap_read_file(path) || !snap_deserialize(frame)) return 0;
+    cfg_reset(); load_run_config(); gpu_apply_config();
+    if (g_gpu_on && g_hd_s) gpu_hd_resync(&g_gpu_native);
+    return 1;
+}
+static void state_path(char* dst, int slot) {                                       /* /states/slotN.state */
+    const char* s = "/states/slot0.state";
+    int i = 0;
+    while (s[i]) { dst[i] = s[i]; i++; }
+    dst[i] = 0; dst[12] = (char)('0' + slot);
+}
+/* a hash of the state the game can see: PS1 RAM, scratchpad, the native game's stacks, the native machine's VRAM (equal hashes = equal game state; used by "hashevery" and the determinism self-test) */
+static unsigned hash_words(unsigned h, unsigned addr, unsigned bytes) {
+    const unsigned* p = (const unsigned*)addr;
+    unsigned n = bytes >> 2;
+    while (n--) h = (h ^ *p++) * 16777619u;
+    return h;
+}
+static unsigned state_hash(void) {
+    unsigned h = 2166136261u;
+    h = hash_words(h, 0x80000000u, 0x200000u); h = hash_words(h, 0x1f800000u, 0x1000u); h = hash_words(h, THREAD_STACK_WINDOW, THREAD_STACK_WINDOW_BYTES);
+    if (g_gpu_on) h = hash_words(h, (unsigned)g_gpu_native.vram, (unsigned)sizeof g_gpu_native.vram);
+    return h;
+}
+/* what happens at the end of a frame (the game is suspended, the machines are in a consistent state): the snapshot the run configuration asks for, the viewer's save / load command, the
+ * determinism self-test ("detcheck FRAME M": save the state after FRAME, run M frames recording the state hash, load the state, run the same M frames again (the controller script is a function
+ * of the frame number): every hash must be equal -- proves that the snapshot holds all the state and that the game is deterministic), the periodic state hash */
+static void frame_end(int frame, int* loop_frame) {
+    char path[32];
+    if (g_hash_every && (unsigned)frame % g_hash_every == 0) { out("H "); outnum(frame); out(" "); outhex(state_hash()); out("\n"); }
+    if (g_det_frame) {
+        struct snap_ctl_f* c = &g_snapctl;
+        if (c->det_phase == 0 && (unsigned)frame == g_det_frame) {
+            if (snap_arena() && snap_serialize((unsigned)frame)) { c->det_phase = 1; c->det_frame = frame; c->det_m = (int)g_det_m; c->det_idx = 0; out("determinism check: state saved after frame "); outnum(frame); out(", recording "); outnum((long)g_det_m); out(" frames\n"); }
+            else { out("determinism check: cannot save the state\n"); c->det_phase = 4; }
+        } else if (c->det_phase == 1) {
+            c->det_hash[c->det_idx++] = state_hash();
+            if (c->det_idx >= c->det_m) {
+                unsigned f;
+                if (!snap_deserialize(&f)) { out("determinism check: cannot load the state\n"); c->det_phase = 4; }
+                else { cfg_reset(); load_run_config(); gpu_apply_config(); if (g_gpu_on && g_hd_s) gpu_hd_resync(&g_gpu_native); c->det_phase = 2; c->det_idx = 0; *loop_frame = c->det_frame; out("determinism check: state loaded again, replaying\n"); }
+                return;
+            }
+        } else if (c->det_phase == 2) {
+            unsigned h = state_hash();
+            if (h != c->det_hash[c->det_idx]) { out("DETERMINISM CHECK FAILED: frame "); outnum(frame); out(" (replay frame "); outnum(c->det_idx + 1); out("): state hash "); outhex(h); out(" instead of "); outhex(c->det_hash[c->det_idx]); out("\n"); c->det_phase = 4; }
+            else if (++c->det_idx >= c->det_m) { out("determinism check passed: "); outnum(c->det_m); out(" frames replayed from the saved state after frame "); outnum(c->det_frame); out(" gave identical state hashes every frame\n"); c->det_phase = 3; }
+        }
+    }
+    if (g_snap_save_frame && (unsigned)frame == g_snap_save_frame) snap_save_file(g_snap_save_path, (unsigned)frame);
+    if (g_play_cmd) {
+        int c = g_play_cmd;
+        g_play_cmd = 0;                                                                /* before the state is written: a loaded state must not carry the command that loads it */
+        if (c >= 1 && c <= 8) { state_path(path, c); snap_save_file(path, (unsigned)frame); }
+        else if (c >= 0x11 && c <= 0x18) {
+            unsigned f;
+            state_path(path, c - 0x10);
+            if (restore_state(path, &f)) { out("state "); outnum(c - 0x10); out(" loaded (frame "); outnum((long)f); out(")\n"); }
+            else { out("no usable state in slot "); outnum(c - 0x10); out("\n"); }
+        }
+    }
+}
+/* native-only mode (play 2), at the VSync that follows a code-overlay read: the new module evicts every active module whose address range it overlaps (their code bytes come back from
+ * the copy install_module kept, except where the read has overwritten them), then its natively compiled functions are installed */
+static int native_only_overlay(unsigned dst, unsigned sectors, unsigned lba) {
+    int mi = module_at(lba), k, j;
+    unsigned blo, bhi;
+    (void)dst; (void)sectors;
+    if (mi < 0) { out("the game loads a code overlay that is not in the module table (LBA "); outnum((long)lba); out(") -- stopping\n"); return 0; }
+    blo = g_modules[mi].load; bhi = blo + g_modules[mi].sectors * 2048u;
+    for (k = 0; k < g_nactive; k++) {
+        const struct module* a = &g_modules[g_active[k]];
+        unsigned alo = a->load, ahi = a->load + a->sectors * 2048u;
+        if (alo < bhi && blo < ahi) {
+            int i, q, m = g_active[k];
+            for (i = 0; i < g_modules[m].nfns; i++) {
+                const struct mfn* f = &g_modules[m].fns[i];
+                unsigned id = fn_id(m, i);
+                if (f->native && f->size >= 5 && id < COV_MAX) for (q = 0; q < 5; q++) { unsigned ad = f->addr + (unsigned)q; if (ad < blo || ad >= bhi) *(volatile unsigned char*)ad = g_saved5[id][q]; }
+            }
+            for (j = k; j + 1 < g_nactive; j++) g_active[j] = g_active[j + 1];
+            g_nactive--; k--;
+        }
+    }
+    g_active[g_nactive++] = mi;
+    if (!install_module(mi)) { out("no native code for the overlay "); out(g_modules[mi].name); out(" -- stopping\n"); return 0; }
+    return 1;
+}
 static int main_test(void) {
-    int frame, rn, ro, diffs;
+    int frame, rn, ro, diffs, start_frame = 1;
     hle_platform_t pa, pb;
     pa.ctx = (void*)"original"; pa.r8 = ia_r8; pa.w8 = ia_w8; pa.write_bytes = ia_wb; pa.call = ia_call; pa.read_sector = read_sector; pa.frame = ia_frame; pa.log = log_call; pa.is_overlay = is_overlay_lba; pa.interp_reexec = 1; pa.valid = ia_valid; pa.stack_lo = pa.stack_hi = 0;
     pb.ctx = (void*)"native"; pb.r8 = nb_r8; pb.w8 = nb_w8; pb.write_bytes = nb_wb; pb.call = nb_call; pb.read_sector = read_sector; pb.frame = nb_frame; pb.log = log_call; pb.is_overlay = is_overlay_lba; pb.interp_reexec = 0; pb.valid = nb_valid; pb.stack_lo = MAIN_STACK_WINDOW; pb.stack_hi = MAIN_STACK_WINDOW + MAIN_STACK_BYTES;
     hle_init(&hle_i, &pa);
     hle_init(&g_hle_native, &pb);
-    if (g_gpu_on) {
-        gpu_reset(&g_gpu_orig); gpu_reset(&g_gpu_native); hle_i.gpu = &g_gpu_orig; g_hle_native.gpu = &g_gpu_native;
-        { unsigned q; g_gpu_orig.n_skip = g_gpu_native.n_skip = g_nskipcmd; for (q = 0; q < g_nskipcmd; q++) g_gpu_orig.skip_cmd[q] = g_gpu_native.skip_cmd[q] = g_skipcmd[q]; }
-        if (g_gpu_watch) { g_gpu_orig.watch_on = g_gpu_native.watch_on = 1; g_gpu_orig.watch_x = g_gpu_native.watch_x = g_gpu_watch_x; g_gpu_orig.watch_y = g_gpu_native.watch_y = g_gpu_watch_y; }
-    }
+    if (g_gpu_on) { gpu_reset(&g_gpu_orig); gpu_reset(&g_gpu_native); gpu_apply_config(); }
 
     /* --- run the ORIGINAL from the entry point to main() --- */
     g_main_addr = addr_of("main");
@@ -1226,20 +1522,42 @@ static int main_test(void) {
     gte_of[0] = gte_of[1] = g_gte;
     hle_i.cd_reads = 0; hle_i.cd_sectors = 0; hle_i.calls = 0;
     start_native_game();
+    if (g_snap_load_path[0] && !g_snapctl.loaded) {                               /* "snapload PATH": continue a game saved earlier (both machines, every byte of state) */
+        unsigned f = 0;
+        char path[sizeof g_snap_load_path];
+        int q;
+        for (q = 0; q < (int)sizeof path; q++) path[q] = g_snap_load_path[q];
+        if (!restore_state(path, &f)) { out("cannot load the state "); out(path); out(": missing, or written by another build of the program\n"); return 1; }
+        g_snapctl.loaded = 1;
+        start_frame = (int)f + 1;
+        out("state "); out(path); out(" loaded: continuing after frame "); outnum((long)f); out("\n");
+    }
 
     /* --- frame by frame --- */
-    for (frame = 1; frame <= (int)g_frames; frame++) {
+    for (frame = start_frame; frame <= (int)g_frames; frame++) {
         g_cur_frame = frame;
         g_hle_native.pad_mask = hle_i.pad_mask = pad_at((unsigned)frame);                  /* both machines see the same controller */
         null_page_close();
         {   int q;
             for (q = 0; q < g_npokes; q++) {
-                if (g_pokes[q].done || *(unsigned*)(interp_ram + (g_pokes[q].caddr & 0x1fffff)) != g_pokes[q].cval) continue;
+                unsigned cur = g_native_only ? *(volatile unsigned*)g_pokes[q].caddr : *(unsigned*)(interp_ram + (g_pokes[q].caddr & 0x1fffff));     /* the native game alone: its own RAM decides */
+                if (g_pokes[q].done || cur != g_pokes[q].cval) continue;
                 *(volatile unsigned*)g_pokes[q].addr = g_pokes[q].val;                       /* native RAM */
-                *(unsigned*)(interp_ram + (g_pokes[q].addr & 0x1fffff)) = g_pokes[q].val;    /* the interpreter's RAM */
+                if (!g_native_only) *(unsigned*)(interp_ram + (g_pokes[q].addr & 0x1fffff)) = g_pokes[q].val;    /* the interpreter's RAM */
                 g_pokes[q].done = g_pokes[q].repeat ? 0 : 1;                                  /* a repeating poke fires whenever its condition holds again */
                 out("  [frame "); outnum(frame); out("] poke: *0x"); outhex(g_pokes[q].addr); out(" = 0x"); outhex(g_pokes[q].val); out(" (when *0x"); outhex(g_pokes[q].caddr); out(" == 0x"); outhex(g_pokes[q].cval); out(")\n");
             }
+        }
+        if (g_native_only) {                                                         /* the native game alone: no original, no comparison -- a divergence cannot stop the game */
+            g_hle_native.trace_n = 0; g_hle_native.trace_lost = 0; g_hle_native.otdump_n = 0;
+            g_gpu_native.cur_frame = (unsigned)frame;
+            rn = run_native();
+            if (rn < 0) { out("native main() returned before frame "); outnum(frame); out("\n"); return 1; }
+            g_where = rn == HLE_SYNC_OVERLAY ? "overlay load" : "VSync";
+            if (rn == HLE_SYNC_OVERLAY && !native_only_overlay(g_hle_native.sync_arg0, g_hle_native.sync_arg1, g_hle_native.sync_arg2)) return 1;
+            if (g_play) play_frame(frame);
+            frame_end(frame, &frame);
+            continue;
         }
         hle_i.trace_n = g_hle_native.trace_n = 0; hle_i.trace_lost = g_hle_native.trace_lost = 0;
         hle_i.otdump_n = g_hle_native.otdump_n = 0;
@@ -1327,6 +1645,7 @@ static int main_test(void) {
         } else
         if (g_hle_native.frame_counter != hle_i.frame_counter || g_hle_native.cd_reads != hle_i.cd_reads) { out("FRAME "); outnum(frame); out(": VSync/CD counters differ\n"); return 2; }
         report_watch(frame);
+        if (g_play) play_frame(frame);
 #ifdef WHERE_FRAME
         if (frame == WHERE_FRAME) { out("the original at the VSync of frame "); outnum(frame); out(":\n"); print_orig_state(); }
 #endif
@@ -1335,8 +1654,10 @@ static int main_test(void) {
         }
         if (hle_i.reexec) { hle_i.reexec = 0; cpu.fault = 0; cpu.pc = cpu.fault_pc; cpu.npc = cpu.pc + 4; }   /* VSync(n): the remaining blanks are the same call again */
         else { cpu.fault = 0; cpu.pc = cpu.r[31]; cpu.npc = cpu.pc + 4; }         /* the HLE'd VSync returns to its caller */
+        frame_end(frame, &frame);
     }
-    out("== "); outnum((long)g_frames); out(" frames: RAM identical at every VSync\n");
+    if (g_native_only) { out("== "); outnum((long)g_frames); out(" frames run (the native game alone: nothing was compared)\n"); }
+    else { out("== "); outnum((long)g_frames); out(" frames: RAM identical at every VSync\n"); }
     report_stubs();
     return 0;
 }
@@ -1344,6 +1665,8 @@ static int main_test(void) {
 void _start(void) {
     int bad;
     long n, n_tramp;
+    load_run_config();                                                        /* first: "play N" sends the log to stderr, so nothing may reach stdout (the frame stream) before it is read */
+    { extern char _end[]; if ((unsigned)_end > THUNK_BASE) { out("the program image (.bss) reaches the coverage-thunk mapping: raise THUNK_BASE\n"); sys3(1, 1, 0, 0); } }
     if (!map_fixed(0x80000000u, 0x200000u)) { out("mmap of the RAM image FAILED\n"); sys3(1, 1, 0, 0); }
     map_fixed(0x1f800000u, 0x1000u);                                         /* scratchpad (the native game may use it); I/O registers stay unmapped: a touch is a crash report */
     if (!map_fixed(THREAD_STACK_WINDOW, THREAD_STACK_WINDOW_BYTES)) { out("mmap of the thread-stack window FAILED\n"); sys3(1, 1, 0, 0); }
@@ -1368,7 +1691,6 @@ void _start(void) {
     }
 #endif
     gte_reset();
-    load_run_config();
     bad = main_test();
     report_null_sites();
     write_coverage();

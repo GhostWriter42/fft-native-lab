@@ -20,6 +20,8 @@ resolve() {
            res = res substr(line, 1, RSTART-1) "@" substr(line, RSTART+1, RLENGTH-1) "(" (r? s[r] : "?") "+" (r? v-a[r] : 0) ")"; line=substr(line, RSTART+RLENGTH) }
          print res line }' $N/ls_prog.nm "$1"
 }
+# PLAY: interactive -- stdin/stdout are the viewer's pipes (play.py), the log goes to stderr (run.cfg "play 1"); no post-processing
+if [ -n "$PLAY" ]; then exec /ob/ls_pc/prog; fi
 # RUN_ONLY: run the program an earlier build linked (soak.ps1 runs it once per random input script; /run.cfg carries frames and pad)
 if [ -n "$RUN_ONLY" ]; then
   rc=0; /ob/ls_pc/prog > $W/out.txt 2>&1 || rc=$?

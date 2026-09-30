@@ -2,7 +2,20 @@
 
 Started 2026-09-29 (evening). Last updated 2026-09-30 (late). Newest status at the top.
 
-## Latest: the native game draws real frames, bit-identical with the original code
+## Latest: the native game draws real frames, bit-identical with the original code -- and now runs alone, saves its state and is deterministic
+
+**New (night of 2026-09-30, details in `NATIVE-RUNTIME.md` "Result 5"):**
+
+* **Native-only mode**: no interpreter, no comparison, ~260 frames/s (11,000 frames of title -> first battle in 42 s).
+* **Playable viewer** (`port\native\play.ps1`; written and protocol-tested headless, the Tk window itself not yet opened): keyboard, pause, fast-forward, screenshots, optional HD factor,
+  optional `-Verify` (the original machine code runs alongside and is compared while you play). No sound yet, movies skipped.
+* **Save states of the whole machine** (F1-F8 in the viewer, `-SnapSave` / `-SnapLoad` in the harness, 0.8-11 MB): instant save / load, scenario starts without replaying 11,000 frames.
+* **Determinism, measured**: replaying 1,700 battle frames from a saved state gives identical state hashes at every frame, and two independent processes fed the same inputs for 11,000 frames
+  print identical state hashes -- the prerequisite for lockstep multiplayer (a leaked host stack pointer was the only thing in the way, fixed).
+* **HD canvas prototype** (`-Hd 2..4`): 3D polygons on a finer grid, verified against the 1x path (8,300 frames, RAM and VRAM identical); 2D art is only pixel-doubled, the CPU rasteriser is too slow
+  for real time -- the plumbing for a GPU renderer + replacement art, not HD art itself.
+* Long soak finished: **40 of 40 seeds x 60,000 frames identical** (the 5 earlier failures were dead stack garbage); final-binary regression 16 of 16 x 12,000 with VRAM compared.
+* Two driver bugs found and fixed on the way (a fixed mapping overlapping the growing `.bss`; log lines reaching the frame stream).
 
 The decomp's C (plus a short list of reviewed patches for places where it relied on what the 1990s MIPS compiler happened to do) is compiled with a modern compiler into a
 32-bit program that runs the **whole game** -- boot, title menu, new game, name entry, the opening events, the first battle, and (with a cheat that ends that battle) the world
@@ -18,7 +31,7 @@ Brave Story / Tutorial / Data / Option, War Funds, the party marker), and the **
 |---|---|
 | title -> first battle, random play (40 seeds x 12,000 frames, 12-16 docker runs in parallel) | RAM and VRAM identical at every frame |
 | world map, random play (24 seeds x 9,000 frames, poked start state) | RAM and VRAM identical at every frame |
-| 60,000-frame games (40 seeds) | 35 of 40 identical at the last full run; the 5 others diverged only in dead stack garbage (now tolerated; re-run pending) |
+| 60,000-frame games (40 seeds) | **40 of 40 identical** (2.4 million frames compared, 16 containers in parallel, 974 s; earlier run 35 of 40, the 5 others were dead stack garbage, now tolerated) |
 | function coverage reached by these runs | main 325/821, battle 1,247/1,912, events 272/777, world 608/1,013, wldcore 138/435, opening 70/150 (effect overlays barely) |
 
 What this took (all documented in `NATIVE-RUNTIME.md` section 9): whole-program lockstep with overlay switching (126 modules), CD streaming / event / pad / timing models,

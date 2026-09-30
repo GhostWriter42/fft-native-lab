@@ -178,7 +178,7 @@ formation, tutorials). `soak.ps1` runs one docker container per seed, 12-16 in p
 | title -> battle, random play | 40 x 12,000 | all identical (RAM and VRAM), 74 s wall on 12 parallel runs |
 | world map (poked), random play | 24 x 9,000 | all identical (RAM and VRAM) |
 | title -> battle, 30,000-frame button mash | 1 | identical |
-| title -> battle, long | 40 x 60,000 | 35 identical at the last full run; the 5 others were dead stack garbage (see "Comparison rules") -- fixed, re-run pending |
+| title -> battle, long | 40 x 60,000 | **40 identical** (seeds 201-240; an earlier run had 35, the 5 others were dead stack garbage, see "Comparison rules"). Function coverage of these seeds: 2,183 of 5,318 functions (battle 1,353 / 1,912, main 328 / 821, effect overlays 2 / 210) |
 
 Function coverage of the native game (union over the soak seeds, `build\soak\coverage.txt`): main 325/821, battle 1,247/1,912, opening 70/150, event overlays 272/777,
 world 608/1,013, wldcore 138/435; effect overlays are hardly reached by random play (an ability with an effect must be used: 3 EFFECT loads in ~10 long seeds).
@@ -202,7 +202,36 @@ literal transliterations (`replacements/world_asm.c`, `battle_asm2.c`); the four
 any other leaf routine. Two GPU details the game depends on, found by looking at the pictures: libgpu clamps the clip rectangle of a DRAWENV (the deployment screens ask for
 x = -128: clamped to 0; masking it wrapped pixels into the texture pages at the right edge of the VRAM and striped every wall), and `StoreImage` must return what is in VRAM.
 
-The framebuffer is currently plain 1x VRAM; the same model with an internal scale factor, bilinear/scaled texture sampling and widescreen is the HD renderer (`ROADMAP.md`).
+The VRAM itself stays plain 1x (the game reads it back); the HD prototype below keeps a second, finer copy of the two display buffers.
+
+**Result 5: the native game alone -- playable, savable, deterministic** (2026-09-30 night).
+
+* **Native-only mode** (`-NativeOnly` / run.cfg `nativeonly 1`): the original still boots on the interpreter up to `main()` (its RAM is copied into the native image), then only
+  the native game runs -- no interpreter, no comparison. 11,000 frames of title -> first battle with the software GPU take 42 s (~260 frames/s, one core). Overlay loads still
+  install / evict modules: the five code bytes each x86 trampoline replaces are kept (`g_saved5`) because there is no interpreter RAM to take them back from.
+* **Play mode** (`play.ps1` -> `play.py` <-> docker container, over the container's stdin/stdout): every frame the driver sends `'F' 'R' w h frame` + RGB, the viewer answers with
+  three bytes (the pad, 16 bits, and a command byte). Keys: arrows, Z Cross, X Circle, A Square, S Triangle, Q/W L1/R1, E/R L2/R2, Enter Start, Backspace Select; P pauses
+  (the game is frame-driven by the viewer's answers), Tab fast-forwards, F12 saves a PNG, **F1-F4 save the whole machine state to a slot, F5-F8 load it**. `-Verify` (`play 1`)
+  runs the original machine code alongside and compares RAM and VRAM every frame while you play. `play_test.py` exercises the protocol without a window (both modes pass,
+  1,300 frames, save + load). The Tk window itself has not been exercised yet; no sound, movies skipped.
+* **HD canvas prototype** (`-Hd 2..4`, run.cfg `hd S`): the native machine's GPU also keeps its two display buffers at S times the resolution; polygons are rasterised on the
+  finer grid (per-pixel barycentric interpolation, texel chosen per HD pixel), every other pixel write (sprites, tiles, lines, fills, uploads) becomes an S x S block. Shots
+  get an `h<frame>.png` twin. It is verified in the lockstep (8,300 frames to the first battle at 2x, RAM and VRAM identical -- the 1x path is unchanged) and looks right, but
+  2D art is merely pixel-doubled, and the CPU rasteriser is ~5-20x slower at 2x-4x: the real thing is a GPU renderer fed with the same command stream plus replacement art.
+* **Save states** (`-SnapSave 'FRAME:name'`, `-SnapLoad name`, F1-F8 in play mode): the snapshot is the program's writable image (.data/.bss: both machines' HLE, GPU, GTE, interpreter and
+  the driver), PS1 RAM, scratchpad, the thread-stack window and the coverage thunks, all-zero 4 KiB pages stored as a flag: 0.8-11 MB per state, valid only for the exact program
+  build that wrote it (the header records the image layout). The game is always suspended at a frame boundary when a state is written or read, so its registers are already on its
+  own stack inside the window; after a load the run configuration is read again. `tools/statediff.py A.state B.state` lists where two states differ, with symbol names.
+* **Determinism** (`-DetCheck 'FRAME:M'`, `-HashEvery N`): (1) in one process, save the state after FRAME, run M frames recording a hash of everything the game can see (RAM,
+  scratchpad, stacks, VRAM), load the state, run the same M frames again: identical at every frame (200 frames of the title, 1,700 frames of the first battle). (2) Two
+  independent processes with the same inputs print identical state hashes (22 samples over 11,000 frames, title -> battle with random play). (1) proves the snapshot holds all
+  the state, (2) proves the game does not depend on the process. What broke (2) at first, found with `statediff.py`: the coroutine switch left the driver's stack pointer (a host
+  address, different in every process) as a dead argument slot on the game's stack -- now an argument-free `ls_yield`. This is what lockstep multiplayer needs: the same
+  binary + the same inputs = the same game, hashes for desync detection, snapshots for rollback and join-in-progress.
+* Two driver bugs found on the way: the coverage-thunk mapping (a fixed address) ended up *inside* the growing `.bss`, silently replacing part of the native GPU struct
+  (mappings now use `MAP_FIXED_NOREPLACE`, `_start` checks the image end), and log lines printed before the run configuration was read went to stdout, which in play mode carries the frames.
+
+Regression after all of this: 16 of 16 seeds x 12,000 frames identical with RAM and VRAM compared.
 
 **Comparison rules** (documented, not bugs): the kernel area below 0x8000f800; `g_psyq_crt_constructors_ran` and the `g_psyq_*_saved_ra` words; the thread records' register
 save areas and stacks; the first 23 words of the scratchpad (the hand-assembled blitters and 64-bit routines park registers and loop temporaries there); a word that holds a
@@ -251,5 +280,9 @@ undecompiled libgs routine (`world_gs_sortpoly`) was executed as x86 (its MIPS b
 * The rest of the WLDCORE/WORLD surface (travel, shops, formation, tutorials) with deeper random play; the world soak starts from a poked state (no story events ran).
 * Verify the GPU model against a reference (an emulator's output for the same frames) -- the frames look right, but bit-exactness with the hardware (dithering, exact
   edge rules) has not been checked; dithering is not modelled.
-* The HD renderer proper: internal scale factor, scaled/filtered texture sampling, widescreen; then the platform layer (window, input, audio) outside the test harness.
-* A source-level division policy for non-x86 targets; the thread-context snapshot for rollback / netplay.
+* The HD renderer proper: a GPU renderer fed with the same command stream (internal scale factor, filtered / replaced textures, widescreen); then the platform layer (window, input, audio)
+  outside the test harness (a Windows build needs a toolchain that is not in the docker image: a download that needs your approval).
+* A source-level division policy for non-x86 targets.
+* Netplay prototype on top of the determinism result: two instances + an input relay (lockstep with input delay), co-op by routing the pad of the unit's owner, periodic state hashes
+  for desync detection, a snapshot for joining a game in progress.
+* Use save states to start scenarios directly (a battle turn, a shop) instead of replaying 11,000 frames: the route to effect-overlay coverage (poke abilities, one trial per state).

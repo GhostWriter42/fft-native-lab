@@ -68,7 +68,7 @@ function New-PokeLines([string]$PokeWhen) {
     return $lines
 }
 
-function New-RunConfig([int]$Frames, [string]$Pad = '', [int]$PadSeed = 0, [int]$PadFrom = 1180, [switch]$TitleToBattle, [string]$PokeWhen = '', [string]$NatWatch = '', [switch]$Gpu, [string]$Shot = '', [int]$ShotEvery = 0, [int]$ShotFrom = 1, [int]$ShotScale = 1, [string]$GpuWatch = '', [int]$PolyDump = 0, [string]$TexDump = '', [string]$SkipCmd = '') {
+function New-RunConfig([int]$Frames, [string]$Pad = '', [int]$PadSeed = 0, [int]$PadFrom = 1180, [switch]$TitleToBattle, [string]$PokeWhen = '', [string]$NatWatch = '', [switch]$Gpu, [string]$Shot = '', [int]$ShotEvery = 0, [int]$ShotFrom = 1, [int]$ShotScale = 1, [string]$GpuWatch = '', [int]$PolyDump = 0, [string]$TexDump = '', [string]$SkipCmd = '', [int]$Hd = 0, [string]$SnapSave = '', [string]$SnapLoad = '', [switch]$NativeOnly, [string]$DetCheck = '', [int]$HashEvery = 0) {
     $all = [System.Collections.Generic.List[object]]::new()
     $n = 0
     if ($Pad) {
@@ -78,6 +78,12 @@ function New-RunConfig([int]$Frames, [string]$Pad = '', [int]$PadSeed = 0, [int]
     if ($PadSeed -gt 0) { foreach ($e in (New-RandomPad $PadSeed $PadFrom $Frames)) { $all.Add([pscustomobject]@{ F = [int]$e[0]; N = $n++; B = $e[1] }) } }
     $lines = @("frames $Frames") + (New-PokeLines $PokeWhen)
     foreach ($c in ($SkipCmd -split ',' | Where-Object { $_ })) { $lines += "skipcmd $([int]$c)" }       # rasteriser debugging: polygon command bytes that are not drawn
+    if ($NativeOnly) { $lines += 'nativeonly 1' }                                                     # run the native game alone (no original machine, no comparison)
+    if ($DetCheck) { $dq = $DetCheck -split ':'; $lines += ('detcheck {0} {1}' -f [int]$dq[0], [int]$dq[1]) }       # determinism self-test: save the state after frame F, run M frames, load it, run them again: equal state hashes every frame
+    if ($HashEvery) { $lines += "hashevery $HashEvery" }                                               # print a hash of the game state every N frames (two runs of the same inputs must print the same lines)
+    if ($SnapLoad) { $lines += "snapload /states/$SnapLoad.state" }                               # start from a machine state written earlier (every byte of both machines); frames are then absolute frame numbers
+    if ($SnapSave) { $sq = $SnapSave -split ':'; $lines += ("snapsave {0} /states/{1}.state" -f [int]$sq[0], $sq[1]) }     # write the machine state after that frame
+    if ($Hd -ge 2) { $Gpu = [switch]$true; $lines += "hd $Hd" }                                     # also render the display buffers at Hd times the resolution (polygons on the finer grid); shots get an h<frame>.png twin
     if ($TexDump) { $Gpu = [switch]$true; $lines += 'texdump ' + (($TexDump -split ',' | ForEach-Object { [int]$_ }) -join ' ') }     # frame,tpx,tpy,mode,clutx,cluty: a texture page decoded as /shots/tex<frame>.png
     if ($PolyDump) { $Gpu = [switch]$true; $lines += "polydump $PolyDump" }                               # print the tall textured polygons of that frame (rasteriser debugging)
     if ($GpuWatch) { $gw = $GpuWatch -split ','; $Gpu = [switch]$true; $lines += ('gpuwatch {0} {1}' -f [int]$gw[0], [int]$gw[1]) }      # log the writes to one VRAM pixel of both machines

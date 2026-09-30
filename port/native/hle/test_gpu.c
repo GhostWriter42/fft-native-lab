@@ -53,5 +53,37 @@ int main(void) {
             printf("\n");
         }
     }
+    /* HD canvas: a 1:1 sprite must come out as the nearest upscale of its 1x image; a polygon must cover about the same area */
+    {
+        static unsigned short hdbuf[2][64 * 64 * 9];
+        unsigned sp[4], quad[12];
+        int bad = 0, cnt1 = 0, cnthd = 0, i, j;
+        memset(&g, 0, sizeof g);
+        gpu_reset(&g);
+        for (v = 0; v < 256; v++) for (u = 0; u < 256; u += 4) { unsigned word = 0; int k; for (k = 0; k < 4; k++) word |= (unsigned)(((u + k) / 4 + v) & 15) << (4 * k); g.vram[v * 1024 + 12 * 64 + u / 4] = (unsigned short)word; }
+        for (u = 0; u < 16; u++) g.vram[480 * 1024 + 16 + u] = (unsigned short)(((u * 2) | ((u * 2) << 5) | ((31 - u * 2) << 10)) | 0x0001);
+        g.hd_s = 3; g.hd_w = 64; g.hd_h = 64; g.hd[0] = hdbuf[0]; g.hd[1] = hdbuf[1];
+        g.clip_x1 = 0; g.clip_y1 = 0; g.clip_x2 = 63; g.clip_y2 = 63;
+        g.hd_n = 1; g.hd_fx[0] = 0; g.hd_fy[0] = 0;
+        g.tp_x = 12; g.tp_y = 0; g.tp = 0;
+        sp[0] = 0x64808080u; sp[1] = (8u << 16) | 8u; sp[2] = (1u << 16) | (480u << 22) | (16u << 8) | 16u; sp[3] = (16u << 16) | 16u;      /* SPRT 16x16 at (8,8), uv (16,16) */
+        gp0_command(&g, sp, 4);
+        for (y = 0; y < 64; y++) for (x = 0; x < 64; x++) {
+            unsigned short c1 = g.vram[y * 1024 + x] & 0x7fff;
+            if (c1) cnt1++;
+            for (j = 0; j < 3; j++) for (i = 0; i < 3; i++) { unsigned short ch = hdbuf[0][(y * 3 + j) * 192 + x * 3 + i]; if (ch) cnthd++; if (ch != c1) bad++; }
+        }
+        printf("sprite: %d pixels at 1x, %d HD pixels, %d mismatches against the nearest upscale\n", cnt1, cnthd, bad);
+        memset(hdbuf, 0, sizeof hdbuf);
+        memset(g.vram, 0, 1024 * 64 * 2);
+        quad[0] = 0x3cffffffu; quad[1] = (10u << 16) | 10u; quad[2] = (1u << 16) | (480u << 22) | (0u << 8) | 0u;
+        quad[3] = 0xffffffu; quad[4] = (10u << 16) | 40u; quad[5] = ((unsigned)12 << 16) | (30u << 8) | 0u;
+        quad[6] = 0xffffffu; quad[7] = (30u << 16) | 10u; quad[8] = (0u << 8) | 30u;
+        quad[9] = 0xffffffu; quad[10] = (30u << 16) | 40u; quad[11] = (30u << 8) | 30u;
+        gp0_command(&g, quad, 12);
+        cnt1 = cnthd = 0;
+        for (y = 0; y < 64; y++) for (x = 0; x < 64; x++) { if (g.vram[y * 1024 + x] & 0x7fff) cnt1++; for (j = 0; j < 3; j++) for (i = 0; i < 3; i++) if (hdbuf[0][(y * 3 + j) * 192 + x * 3 + i]) cnthd++; }
+        printf("quad 30x20: %d pixels at 1x, %d HD pixels (expect about 9x)\n", cnt1, cnthd);
+    }
     return 0;
 }
