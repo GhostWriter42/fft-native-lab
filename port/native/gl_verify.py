@@ -77,6 +77,7 @@ def main():
     ap.add_argument('--fb-check', action='store_true', help='with --vram-check: report the first frame at which the GPU framebuffer (whole 1x VRAM area) differs from the software VRAM')
     ap.add_argument('--fb-min', type=int, default=0, help='with --fb-check: only report a frame with more than this many differing pixels')
     ap.add_argument('--scale', type=int, default=1, help='render at this internal resolution and compare the picture averaged down to 1x (flat areas must match; polygon edges differ a little)')
+    ap.add_argument('--flicker', action='store_true', help='report windows of frames where the SOFTWARE picture alternates (A B A B ...): flashing that is in the game itself')
     ap.add_argument('--cfg-extra', default='', help='more run.cfg lines separated by ;')
     args = ap.parse_args()
 
@@ -114,6 +115,8 @@ def main():
     pad_fn = make_pad(args.pad_seed)
     dump_frames = {int(v) for v in args.save.split(',') if v.strip()}
     vram_reports = []
+    hist_sw = []
+    flick = []
     fb_first = None
     results = []          # (frame, frac, mean, None, None): metrics only; the pictures of the worst frames and of --save frames are kept in `kept` (memory stays flat)
     kept = {}
@@ -161,6 +164,13 @@ def main():
         else:
             frac, mean = 1.0, 255.0
         results.append((n, frac, mean, None, None))
+        if args.flicker:
+            hist_sw.append(sw.astype(np.int16)[::2, ::2].copy())
+            if len(hist_sw) > 3:
+                hist_sw.pop(0)
+            if len(hist_sw) == 3 and hist_sw[0].shape == hist_sw[1].shape == hist_sw[2].shape:
+                d1 = float(np.abs(hist_sw[2] - hist_sw[1]).mean()); d2 = float(np.abs(hist_sw[2] - hist_sw[0]).mean())
+                flick.append((n, d1, d2, float(hist_sw[2].mean())))
         if n in want_frames or len(kept) < args.shots or frac > min((kept[k][0] for k in kept if k not in want_frames), default=-1.0):
             kept[n] = (frac, mean, sw.copy(), gl.copy())
             extra = [k for k in kept if k not in want_frames]
@@ -204,6 +214,14 @@ def main():
     glfw.terminate()
     if not results:
         sys.exit(1)
+    if args.flicker and flick:
+        fl = np.array(flick)
+        isf = (fl[:, 1] > 6.0) & (fl[:, 2] < 0.35 * fl[:, 1])        # this frame differs from the last one but resembles the one before: A B A
+        print(f'flicker: {int(isf.sum())} frames look like A B A B in {len(fl)}')
+        for w0 in range(0, len(fl), 200):
+            blk = isf[w0:w0 + 200]
+            if blk.sum() > 20:
+                print(f'  frames {int(fl[w0, 0])}-{int(fl[min(w0 + 199, len(fl) - 1), 0])}: {int(blk.sum())} of {len(blk)} frames alternate (mean brightness {fl[w0:w0 + 200, 3].mean():.0f})')
     fr = np.array([x[1] for x in results])
     print(f'\n{len(results)} frames compared: {100 * (fr < 0.001).mean():.1f}% of frames have < 0.1% differing pixels; mean {100 * fr.mean():.3f}%, worst {100 * fr.max():.2f}% (frame {int(np.argmax(fr))}); '
           f'trace overflows: {r.stats["overflow"]}')

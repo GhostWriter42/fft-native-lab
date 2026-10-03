@@ -13,7 +13,7 @@
 #   .\port\native\play.ps1 -Join 192.168.1.20:7777   join the other player (you are player 2); -Delay N input delay in frames (default 6)
 #   the host decides the rules: -Seat2 MASK (battle unit slots player 2 plays, default 0x1a) -Hotseat MASK (slots made player-controlled, default 0x1e = the AI allies of the first battle) -RandomBattle
 # FFT_LS_VOL selects the docker volume that holds the compiled program (default fft-ls-objs).
-param([int]$Hd = 0, [int]$Scale = 3, [switch]$Build, [switch]$WorldCheat, [switch]$Verify, [int]$HostPort = 0, [int]$Invite = 0, [string]$Join = '', [int]$Delay = 6, [string]$Seat2 = '0x1a', [string]$Hotseat = '0x1e', [switch]$RandomBattle, [switch]$Gl)
+param([int]$Hd = 0, [int]$Scale = 3, [switch]$Build, [switch]$WorldCheat, [switch]$Verify, [int]$HostPort = 0, [int]$Invite = 0, [string]$Join = '', [int]$Delay = 6, [string]$Seat2 = '0x1a', [string]$Hotseat = '0x1e', [switch]$RandomBattle, [switch]$Gl, [switch]$Compare, [switch]$Record)
 . (Join-Path $PSScriptRoot 'padgen.ps1')
 $vol = if ($env:FFT_LS_VOL) { $env:FFT_LS_VOL } else { 'fft-ls-objs' }
 $have = ((docker run --rm --pull=never --volume "${vol}:/ob" fft-decomp-dev:local sh -c 'test -x /ob/ls_pc/prog && echo yes' 2>$null) -join '').Trim()
@@ -44,7 +44,10 @@ if ($Gl) {                                                     # the graphics ca
     if (-not (Test-Path $venvPy)) { Write-Error 'the OpenGL viewer needs the venv: python -m venv port\build\venv ; port\build\venv\Scripts\pip install moderngl glfw numpy pillow'; exit 1 }
     [System.IO.File]::WriteAllText($cfg, ($text.TrimEnd() + "`naudio 1`ngltrace 1`nplay 2`n"))
     $glScale = if ($Hd -ge 1) { $Hd } else { 2 }
-    & $venvPy (Join-Path $PSScriptRoot 'play_gl.py') --scale $glScale --cfg $cfg
+    $glArgs = @('--scale', $glScale, '--cfg', $cfg)
+    if ($Compare) { $glArgs += '--compare' }
+    if ($Record) { $glArgs += '--record' }
+    & $venvPy (Join-Path $PSScriptRoot 'play_gl.py') @glArgs
     exit $LASTEXITCODE
 }
 [System.IO.File]::WriteAllText($cfg, ($text.TrimEnd() + "`naudio 1`nplay $mode`n"))
