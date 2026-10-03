@@ -355,6 +355,8 @@ Not yet analysed: `world_menu_resize_parent_entry_to_digits` calls `world_text_c
 not. All native builds now compile with `-fno-delete-null-pointer-checks` (a policy, like `-fwrapv`); seed 3027 passes and the 32-seed random-battle regression stays 32 of 32 (30,000 frames).
 NULL-page reads still logged (retail reads zeros from console RAM): that function (action NULL), `battle_ai_load_ability_entry` (unit index from a bad packed id), `bcopy` in `equip_entrypoint`.
 
+**New upstream base (2026-10-03).** The decomp moved on (`adamrt/fft_decomp` 2b09e33: its maintainer fixed many of the same retail-register arguments and documented the same overflows, independently). The native port now builds from our `remove-unneeded-pins-and-barriers` branch rebased onto it (`mktree.ps1 -Rev pub/remove-unneeded-pins-and-barriers`, fft_decomp checked out detached at that commit). 14 of the 48 patches became redundant and were dropped; 2 had to be rewritten for upstream's new text (`equip_menu_update_{vertical,horizontal}_selection_and_mark_change`: upstream gave the wrapper real parameters but the inner call still drops the `input_mask` that retail passes through `$a2`), `portify.py` can now list every patch that no longer applies (`PATCH_KEEP_GOING=1`). Result: 32 of 32 random-encounter seeds identical over 30,000 frames (first attempt without the two rewritten patches: 15 of 16, the failure was exactly that missing argument).
+
 ## 10. Open items
 
 * Audio: the SPU (XA streams, ADPCM voices, reverb) is still only logged by the HLE; the movies (MDEC) are skipped.

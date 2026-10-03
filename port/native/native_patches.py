@@ -21,20 +21,6 @@ PATCHES = [
             'caller uses it as the job-name text table. (Function fuzz: native crashed reading a stale eax.)',
     ),
     dict(
-        file='src/battle/battle_unit_start_post_attack_animation_display.c',
-        old='((void (*)(void))battle_unit_set_target_animation_from_attack_type)();',
-        new='battle_unit_set_target_animation_from_attack_type((battle_unit_misc_data_t*)flag, (battle_unit_misc_data_t*)ctx);',
-        why='the retail call loads no arguments, so the callee receives this function\'s own $a0/$a1 (flag, ctx); replay of the original on '
-            'the interpreter shows args (flag, ctx) at the callee\'s entry. (Function fuzz: native crashed dereferencing stale stack.)',
-    ),
-    dict(
-        file='src/main/main_party_save_unit.c',
-        old='((void (*)(void))main_party_remove_unit)();',
-        new='main_party_remove_unit(index);',
-        why='the retail call loads no argument, so main_party_remove_unit receives the $a0 that still holds `index` (lbu a0,2(s2) at the top of '
-            'main_party_save_unit; disassembly at 0x80059c0c). Function fuzz: native passed a stale value.',
-    ),
-    dict(
         file='src/battle/battle_gfx_set_thrown_item_graphic_palette.c',
         old='g_main_item_item_flags = get_item_data_pointer();',
         new='g_main_item_item_flags = (u8*)main_item_get_data_pointer(graphic_id);',
@@ -174,44 +160,6 @@ PATCHES = [
         why='see above.',
     ),
     dict(
-        file='src/event/bunit_run_ability_list_menu.c',
-        old='    /* The target uses v0 from this void callee. */\n    category = ((s32 (*)(s32, s32, s32, s32))bunit_menu_update_horizontal_selection_and_mark_change)(\n        4, 0, g_bunit_menu_input_repeat_mask, 6);\n',
-        new='    /* retail: the void callee leaves the new selection in $v0 (disassembly of bunit_menu_update_horizontal_selection_and_mark_change, 0x801cc780:\n     * `sll/sra v0,v0,16` after the call to the wrapped-selection routine, untouched by the epilogue) = g_bunit_menu_selection_values[0] */\n    bunit_menu_update_horizontal_selection_and_mark_change(4, 0, g_bunit_menu_input_repeat_mask, 6);\n    category = g_bunit_menu_selection_values[0];\n',
-        why='lockstep soak seeds 23 and 37: the native `category` was garbage (6 vs 1) so the ability list was rebuilt for the wrong tab (g_main_ability_temp_list '
-            'diverged); found by the replay\'s argument comparison (bunit_create_ability_list a2 native 6, original 1).',
-    ),
-    dict(
-        file='src/event/equip_menu_update_vertical_selection_and_mark_change.c',
-        old='    /* The target leaves a2 (input_mask) unset for this three-argument callee. */\n    if (previous_selection\n        != ((s16 (*)(s32, s32))equip_menu_update_wrapped_vertical_selection)(entry_count & 0xFFFF, index)) {',
-        new='    /* retail leaves a2 alone, so the wrapped-selection routine receives this function\'s own input_mask (disassembly 0x801c970c: no write to a2 before the jal) */\n    if (previous_selection\n        != equip_menu_update_wrapped_vertical_selection(entry_count & 0xFFFF, index, input_mask)) {',
-        why='the three-argument callee reads its input mask from $a2, which the retail wrapper never touches: it is the wrapper\'s own third parameter. Natively the call '
-            'passed only two arguments and the mask was stack garbage (the d-pad selection would not respond).',
-    ),
-    dict(
-        file='src/event/equip_menu_update_horizontal_selection_and_mark_change.c',
-        old='    /* The target leaves a2 (input_mask) unset for this three-argument callee. */\n    if (previous_selection\n        != ((s16 (*)(s32, s32))equip_menu_update_wrapped_horizontal_selection)(entry_count & 0xFFFF, index)) {',
-        new='    /* retail leaves a2 alone, so the wrapped-selection routine receives this function\'s own input_mask (disassembly 0x801c9818: no write to a2 before the jal) */\n    if (previous_selection\n        != equip_menu_update_wrapped_horizontal_selection(entry_count & 0xFFFF, index, input_mask)) {',
-        why='twin of equip_menu_update_vertical_selection_and_mark_change.c.',
-    ),
-    dict(
-        file='src/event/equip_menu_run_equip_mode.c',
-        old='        /* The target uses v0 from this void callee. */\n        selected_slot = ((s32 (*)(s32, s32, s32, s8))equip_menu_update_vertical_selection_and_mark_change)(\n            5, 0, g_equip_input_secondary_repeat, 6);\n',
-        new='        /* retail: the void callee leaves the new (s16) selection in $v0 = g_equip_menu_selection_values[0] (disassembly 0x801c970c) */\n        equip_menu_update_vertical_selection_and_mark_change(5, 0, g_equip_input_secondary_repeat, 6);\n        selected_slot = g_equip_menu_selection_values[0];\n',
-        why='the caller consumes the void callee\'s leftover $v0 (the selection); natively that register is garbage.',
-    ),
-    dict(
-        file='src/event/equip_menu_run_remove_mode.c',
-        old='    /* The target uses v0 from this void callee. */\n    selection = ((s32 (*)(s32, s32, s32, s8))equip_menu_update_vertical_selection_and_mark_change)(\n        5, 1, g_equip_input_secondary_repeat, 6);\n',
-        new='    /* retail: the void callee leaves the new (s16) selection in $v0 = g_equip_menu_selection_values[1] (disassembly 0x801c970c) */\n    equip_menu_update_vertical_selection_and_mark_change(5, 1, g_equip_input_secondary_repeat, 6);\n    selection = g_equip_menu_selection_values[1];\n',
-        why='see equip_menu_run_equip_mode.c.',
-    ),
-    dict(
-        file='src/event/equip_menu_run_slot_item_browser.c',
-        old='    /* The target uses v0 from this void callee. */\n    slot = ((s32 (*)(s32, s32, s32, s8))equip_menu_update_horizontal_selection_and_mark_change)(5, 2, input, 6);\n',
-        new='    /* retail: the void callee leaves the new (s16) selection in $v0 = g_equip_menu_selection_values[2] (disassembly 0x801c9818) */\n    equip_menu_update_horizontal_selection_and_mark_change(5, 2, input, 6);\n    slot = g_equip_menu_selection_values[2];\n',
-        why='see equip_menu_run_equip_mode.c.',
-    ),
-    dict(
         file='src/event/bunit_cmd_run_stream.c',
         old='data = ((u8 * (*)(void)) g_bunit_cmd_handlers[data[0]])();',
         new='data = g_bunit_cmd_handlers[data[0]](data);',
@@ -276,17 +224,8 @@ PATCHES = [
     ),
     dict(
         file='src/battle/battle_ai_choose_wait_facing.c',
-        old='    u8 viable_directions[4];\n} battle_ai_wait_facing_work_t;',
-        new='    u8 viable_directions[4];\n    u8 past_the_end; /* index 4: read by the retail code when source and target coincide (battle_ai_find_direction_of_target returns 4); unused stack padding there */\n} battle_ai_wait_facing_work_t;',
-        why='battle_ai_choose_wait_facing indexes viable_directions with the direction of the target, which is 4 when the acting unit stands on the target tile: one byte past the '
-            'array. Retail reads the unused stack padding at sp+28 (disassembly 0x8019acf8: addiu v1,sp,24; addu v0,v1,s0; lbu); a native frame puts a live local there, which made the '
-            'native AI return direction 4 ("keep facing") where the original searched on (lockstep long soak: g_battle_unit_misc_data command_state.cursor.facing_hint 4 vs 0/1/2, seeds '
-            '203, 215, 220, 224, 229, 237). The byte is made an explicit zero (the zero-initialised padding of the oracle).',
-    ),
-    dict(
-        file='src/battle/battle_ai_choose_wait_facing.c',
         old='    do {\n        work.target_coords.bytes.x = ai->acting_unit_coords.bytes.x + g_battle_ai_facing_tile_offsets.bytes[offset];',
-        new='    work.past_the_end = 0;\n    do {\n        work.target_coords.bytes.x = ai->acting_unit_coords.bytes.x + g_battle_ai_facing_tile_offsets.bytes[offset];',
+        new='    work.past_viable_directions = 0;\n    do {\n        work.target_coords.bytes.x = ai->acting_unit_coords.bytes.x + g_battle_ai_facing_tile_offsets.bytes[offset];',
         why='see the first entry: the past-the-end byte of the viability array is zero.',
     ),
     # --- NULL-pointer reads of console low RAM (a build that cannot map page zero, i.e. the Windows port, needs these; the oracle's low RAM reads as zero)
@@ -316,46 +255,26 @@ PATCHES = [
             'One 32-byte array with buf2 at offset 4 halfwords reproduces the retail layout.',
     ),
     dict(
-        file='include/fft/event_equip.h',
-        old='void equip_gfx_build_item_graphic_descriptor(battle_menu_status_panel_graphic_descriptor_t* descriptor);',
-        new='void equip_gfx_build_item_graphic_descriptor(battle_menu_status_panel_graphic_descriptor_t* descriptor, s32 item_id);',
-        why='see equip_gfx_build_item_graphic_descriptor.c (the item id is a register that retail passes through unchanged).',
-    ),
-    dict(
-        file='src/event/equip_gfx_build_item_graphic_descriptor.c',
-        old='void equip_gfx_build_item_graphic_descriptor(battle_menu_status_panel_graphic_descriptor_t* descriptor) {',
-        new='void equip_gfx_build_item_graphic_descriptor(battle_menu_status_panel_graphic_descriptor_t* descriptor, s32 item_id) {',
-        why='lockstep long soak (seeds 1109, 1116): this function calls battle_get_item_graphic_data(&graphic) without loading a1 -- in retail a1 still holds the item id that '
-            'equip_item_build_row_graphic_descriptor passed in it (the decomp documents "the target also passes the row\'s item id in a1"). Natively a1 is lost and the callee got stack garbage '
-            '(0x081d8f71 instead of 0x13), picking a wrong icon (g_equip_cmd_row_sprite_body differed). The item id becomes a real second parameter.',
-    ),
-    dict(
-        file='src/event/equip_gfx_build_item_graphic_descriptor.c',
-        old='    ((void (*)(SPRT*))battle_get_item_graphic_data)(&graphic);',
-        new='    battle_get_item_graphic_data(&graphic, item_id);',
-        why='see above.',
-    ),
-    dict(
-        file='src/event/equip_item_build_row_graphic_descriptor.c',
-        old='    ((void (*)(battle_menu_status_panel_graphic_descriptor_t*, s32))equip_gfx_build_item_graphic_descriptor)(\n        &g_equip_item_graphic_descriptor, ((u8*)g_equip_item_list_entries)[row * 2]);',
-        new='    equip_gfx_build_item_graphic_descriptor(&g_equip_item_graphic_descriptor, ((u8*)g_equip_item_list_entries)[row * 2]);',
-        why='see above: the call now matches the real two-argument prototype.',
-    ),
-    dict(
-        file='src/event/equip_thread_start_if_idle.c',
-        old='    if (((s32 (*)())battle_thread_is_running)() == 0) {',
-        new='    if (battle_thread_is_running(thread_id) == 0) {',
-        why='lockstep long soak (seed 1121, native crash at frame ~24185): the decomp calls battle_thread_is_running with no argument because retail reuses the incoming thread id still in $a0 '
-            '("making the argument explicit changes the target instruction schedule"). A native call passes nothing, so the callee indexed the thread table with a stale stack word '
-            '(0xf83508b4: segmentation fault; with a small stale value the wrong thread slot was tested). The thread id is passed explicitly.',
-    ),
-    dict(
         file='src/event/equip_entrypoint.c',
-        old='    /* The target loads no argument for this one-argument callee. */\n    ((void (*)(void))main_unit_refresh_stats_and_statuses)();',
+        old='    /* The target loads no argument for this one-argument callee: $a0 still\n     * holds stats from the lookup above. */\n    ((void (*)(void))main_unit_refresh_stats_and_statuses)();',
         new='    main_unit_refresh_stats_and_statuses(stats);',
         why='lockstep long soak (seeds 1109, 1116, 1121: g_battle_unit_misc_data+0x148 native 8 vs 0, NULL-page reads in main_unit_update_stats_statuses_and_equipment): when the equipment '
             'screen closes, the decomp calls main_unit_refresh_stats_and_statuses with no argument. Retail leaves `stats` in $a0 (disassembly 0x801bf9a8: move a0,v0 ... 0x801bf9f4: jal '
             'main_unit_refresh_stats_and_statuses with a0 untouched), so it refreshes the edited unit; natively the callee got a stale stack word (NULL or another pointer) and '
             'refreshed the wrong memory. Passing `stats`.',
+    ),
+    dict(
+        file='src/event/equip_menu_update_vertical_selection_and_mark_change.c',
+        old='    /* The target leaves a2 (input_mask) unset for this three-argument callee. */\n    selection = ((s16 (*)(s32, s32))equip_menu_update_wrapped_vertical_selection)(entry_count & 0xFFFF, index);',
+        new='    /* retail leaves a2 alone, so the wrapped-selection routine receives this function\'s own input_mask (disassembly 0x801c970c: no write to a2 before the jal) */\n    selection = equip_menu_update_wrapped_vertical_selection(entry_count & 0xFFFF, index, input_mask);',
+        why='upstream (2b09e33) gave the wrapper its real parameters but still casts the inner call to two arguments. The callee reads its input mask from $a2, which the retail wrapper never touches: '
+            'it is the wrapper\'s own third parameter. Natively the mask was stack garbage: seed 1116 of the long soak queued sound 6 and left the equipment screen on the wrong path at frame 8692. '
+            '(Replaces the older patch of the same name for the pre-2b09e33 source text.)',
+    ),
+    dict(
+        file='src/event/equip_menu_update_horizontal_selection_and_mark_change.c',
+        old='    /* The target leaves a2 (input_mask) unset for this three-argument callee. */\n    selection = ((s16 (*)(s32, s32))equip_menu_update_wrapped_horizontal_selection)(entry_count & 0xFFFF, index);',
+        new='    /* retail leaves a2 alone, so the wrapped-selection routine receives this function\'s own input_mask (disassembly 0x801c9818: no write to a2 before the jal) */\n    selection = equip_menu_update_wrapped_horizontal_selection(entry_count & 0xFFFF, index, input_mask);',
+        why='twin of equip_menu_update_vertical_selection_and_mark_change.c.',
     ),
 ]

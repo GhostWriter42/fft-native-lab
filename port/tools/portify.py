@@ -443,6 +443,7 @@ def main():
     # 5. reviewed native patches (port/native/native_patches.py): retail-ABI accidents that need an explicit source-level fix
     patch_file = Path(__file__).resolve().parent.parent / 'native' / 'native_patches.py'
     npatched = 0
+    failed_patches = []
     if patch_file.exists():
         ns = {}
         exec(compile(patch_file.read_text(encoding='utf-8'), str(patch_file), 'exec'), ns)
@@ -452,9 +453,16 @@ def main():
                 text = dst.read_bytes().decode('utf-8')
                 want = pt.get('count', 1)
                 if text.count(pt['old']) != want:
-                    sys.exit(f"native patch must match {want} time(s) in {rel}: {pt['old']!r} (found {text.count(pt['old'])})")
+                    msg = f"native patch must match {want} time(s) in {rel}: {pt['old']!r} (found {text.count(pt['old'])})"
+                    if os.environ.get('PATCH_KEEP_GOING'):                              # list every patch that no longer applies (after moving to a newer revision)
+                        failed_patches.append(msg)
+                        continue
+                    sys.exit(msg)
                 dst.write_bytes(text.replace(pt['old'], pt['new']).encode('utf-8'))
                 npatched += 1
+        if failed_patches:
+            print('\n'.join(failed_patches))
+            sys.exit(f'{len(failed_patches)} native patch(es) do not apply')
     narrow_return_calls(outdir, report)
     lines = [
         f"native patches applied:    {npatched} (port/native/native_patches.py)",
