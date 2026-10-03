@@ -23,6 +23,7 @@ typedef struct gpu {
     /* optional HD canvases: the two display buffers re-rendered at hd_s times the resolution (polygons rasterised at the finer grid, sprites / tiles / lines / fills as
      * hd_s x hd_s blocks per VRAM pixel); hd[k] points to hd_w * hd_h * hd_s^2 RGB555 pixels supplied by the driver; hd_fx/hd_fy = the framebuffer's VRAM origin */
     int hd_s, hd_n, hd_fx[2], hd_fy[2], hd_w, hd_h, hd_skip;
+    int hd_filter, rd_off;                                                      /* hd_filter: textures are sampled on the HD grid with EPX (Scale2x) edge smoothing instead of nearest-neighbour; rd_off: fetches do not mark VRAM pixels as read */
     unsigned short* hd[2];
     /* statistics */
     unsigned n_prims, n_tris, n_rects, n_lines, n_unknown, n_tex_px[3], n_px, n_cmd[256], n_loadimage, n_moveimage, n_storeimage, n_clearimage;

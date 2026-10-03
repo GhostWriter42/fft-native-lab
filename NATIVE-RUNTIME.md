@@ -215,9 +215,13 @@ The VRAM itself stays plain 1x (the game reads it back); the HD prototype below 
   runs the original machine code alongside and compares RAM and VRAM every frame while you play. `play_test.py` exercises the protocol without a window (both modes pass,
   1,300 frames, save + load). The Tk window itself has not been exercised yet; no sound, movies skipped.
 * **HD canvas prototype** (`-Hd 2..4`, run.cfg `hd S`): the native machine's GPU also keeps its two display buffers at S times the resolution; polygons are rasterised on the
-  finer grid (per-pixel barycentric interpolation, texel chosen per HD pixel), every other pixel write (sprites, tiles, lines, fills, uploads) becomes an S x S block. Shots
-  get an `h<frame>.png` twin. It is verified in the lockstep (8,300 frames to the first battle at 2x, RAM and VRAM identical -- the 1x path is unchanged) and looks right, but
-  2D art is merely pixel-doubled, and the CPU rasteriser is ~5-20x slower at 2x-4x: the real thing is a GPU renderer fed with the same command stream plus replacement art.
+  finer grid (per-pixel barycentric interpolation), textured sprites are drawn directly on the HD grid, every other pixel write (tiles, lines, fills, uploads) becomes an S x S
+  block. **Textures are sampled with an EPX (Scale2x) filter** (`hdfilter 1`, the default; applied twice at 4x; `hdfilter 0` = nearest): a texel is split into sub-pixels that take the
+  colour of the neighbouring texel on their side when the two neighbours around that corner agree and the opposite pair does not, so sprite, UI-text and map-texture edges stay crisp
+  and staircases are smoothed (`port/samples/native-frames/09-...` at 4x, `10-` / `11-` filter on / off at 2x). Shots get an `h<frame>.png` twin. Verified in the lockstep (8,300 frames
+  to the first battle at 2x, 3,000 frames with the filter, RAM and VRAM identical -- the 1x path is unchanged; the filter's neighbour fetches do not mark VRAM as read). The art is
+  still the PS1's 15-bit textures (no new detail), and the CPU rasteriser is ~5-20x slower at 2x-4x than at 1x: the real thing is a GPU renderer fed with the same command stream plus
+  replacement art. Save states make HD iteration cheap: a render from a state takes 1-2 s instead of replaying 10,000 frames.
 * **Save states** (`-SnapSave 'FRAME:name'`, `-SnapLoad name`, F1-F8 in play mode): the snapshot is the program's writable image (.data/.bss: both machines' HLE, GPU, GTE, interpreter and
   the driver), PS1 RAM, scratchpad, the thread-stack window and the coverage thunks, all-zero 4 KiB pages stored as a flag: 0.8-11 MB per state, valid only for the exact program
   build that wrote it (the header records the image layout). The game is always suspended at a frame boundary when a state is written or read, so its registers are already on its
@@ -232,6 +236,44 @@ The VRAM itself stays plain 1x (the game reads it back); the HD prototype below 
   (mappings now use `MAP_FIXED_NOREPLACE`, `_start` checks the image end), and log lines printed before the run configuration was read went to stdout, which in play mode carries the frames.
 
 Regression after all of this: 16 of 16 seeds x 12,000 frames identical with RAM and VRAM compared.
+
+**Result 6: two players, one game** (2026-09-30 night; `lockstep.c` "Two seats", `netplay.py`, `netplay_test.py`).
+
+* *How the game decides who plays:* a unit is played by a human only if `team_flags & BATTLE_TEAM_FLAG_PLAYER_CONTROLLED` (0x08; `battle_stats_t` +0x05, copied to `battle_unit_misc_data_t`
+  +0x13d); every other unit is played by the AI (`battle_menu_get_unit_action_menu_id`, `battle_menu_dispatch_idle_action_menu`, `battle_ai_*`), `auto_battle_setting` turns a player unit
+  over to the AI. In the first battle only Ramza (unit slot 0) is player-controlled; Delita, Algus and the other allies are AI units. `g_battle_turn_unit_id` names the unit whose turn it is.
+* *Seats* (`seats 2`, `seat2units MASK`, `hotseat MASK`; `-Seats/-Seat2Units/-Hotseat/-Pad2Seed` in `lockstep.ps1`): the driver picks the controller the game sees, each frame, from the game
+  state -- in battle, while the turn unit is player-controlled and its slot is in `seat2units`, controller 2, otherwise controller 1 -- and `hotseat` sets the player-control flag on more
+  unit slots every frame (both structures). With the allies flagged, the game opens the command menu on their turns and waits for controller 2 when seat 2 owns them.
+  Verified in the lockstep (original machine code alongside, RAM and VRAM compared): 14,000 frames of the first battle with slots 1-4 flagged, slot 2 owned by seat 2, random play on both controllers.
+* *Netplay* (input-delay lockstep): `netplay.py` exchanges one 9-byte record per message over TCP ('P' = my controller for frame f + delay, 'H' = my state hash of frame f), `play.py --host PORT` /
+  `--join HOST:PORT` are the two windows, `netplay_test.py` the headless test (two containers, loopback). Only two bytes of controller per frame and a hash every 60 frames cross the wire.
+  Result: 14,000 frames with player 2 playing slot 2's turns (controller hand-over visible in the logs, `[frame 8658] controller 2 plays now`), 233 state-hash samples identical on both
+  instances; the same with 15 ms of random jitter per frame (6,000 frames, 100 samples). The game needs no changes for this: same binary + same inputs = same game (Result 5).
+  **Joining a game in progress** (`play.py --invite PORT` for the host, `--join HOST:PORT` for the guest): the host plays alone; when a guest connects the host's viewer asks the driver for a
+  whole-machine state, sends it with the two-player configuration (`C` / `S` blobs on the same link), rewrites the session's run.cfg (a mounted directory the driver rereads whenever
+  a state is loaded) and loads the same state itself; the guest boots its game, loads the received state and both continue from identical memory with the frame counters aligned (a loaded
+  state also restores the frame counter). Headless test (`play.py --test-frames`, two processes, real Tk code path with the window hidden): the guest joined at game frame ~1,800,
+  2,400 frames later 40 state-hash comparisons had matched and none had differed; when the guest leaves the host stops at that frame (lockstep cannot go on without the other controller).
+* *Not covered:* a real network (latency and loss beyond TCP, NAT traversal), recovering from a desync (the state transfer used for joining would do it), more than two players, the world map and menus
+  (controller 1 only), states / pause (saving or loading on one side would desync, so the viewer disables them in netplay), and **enemy units as player units** (PvP hot seat): with the enemies
+  flagged the game runs code retail never runs -- the equipment screen of a non-party unit -- where the native build and the original differ in how they handle the garbage, and later the native
+  build crashed (frame 23,891 of the test). Co-op with the AI allies is the natural first mode; PvP needs the enemy units to carry real party data.
+* *Scenario generators* (reach code the first battle never runs; all are run.cfg lines or `-PokeWhen` strings, applied to both machines of a lockstep):
+  `g_battle_entd_selection_mode=0:g_battle_entd_selection_mode=3:repeat` makes the first battle draw a random encounter from ENTD sets 1-59 (a Chocobo on the player's side, other jobs ...);
+  `hotseat MASK` (player-control flag on more units), `caster MASK SEED` (a magic skillset, 999 MP and every ability learned for the non-monster units in MASK),
+  `autobattle MASK` (the units play by the AI: battles without input), `effectmap SEED` (every ability plays one of the documented effect files), `traceabil 1` (log each ability a unit
+  starts to use), `cdtrace 1` (log CD reads with frame and sector), `snapsave` / `snapload` (start every seed from a battle-start state), `soak.ps1 -ExtraCfg 'line;line'` (per-seed lines, `{seed}`).
+  Result: 24 of 24 random-encounter seeds x 14,000 frames identical (RAM + VRAM) after two comparison rules were relaxed -- a function the retail code runs on the MAIN stack
+  (`battle_thread_call_on_main_stack`) runs on the worker's own stack natively, so a stack address in an HLE argument is of another class; and the stack spills of WLDCORE (which runs on a stack IN the
+  scratchpad) stay in the original's scratchpad after the module is evicted (now remembered as stale until both machines agree on the word again). Effect overlays: only the 110 effect files
+  that the decomp documents have native code, and the AI casters (`caster` + `autobattle`) loaded effect data from other files (CD reads at LBA 7000 / 61809 in the trace: no match in the module table) without a
+  crash, but also without reaching any of the 110 native effect files. Remapping every ability
+  to documented effect files (`effectmap`) made the native build crash at the first effect (a jump into data at `g_battle_ai_unit_crystal_treasure_status+78`; not analysed yet: probably a
+  function of an undocumented file, or an effect that needs state the remapped ability does not provide). Effect coverage therefore needs a function-level fuzz of the effect files or more
+  decomp progress, not more scenarios.
+* *Persistent shared world (MMO-ish):* nothing here supports it. The game is one save (world map, party, story flags, battles as instances); lockstep shares ONE such game between 2-4 players.
+  A shared world would be a server-side reimplementation of the world state around battle instances.
 
 **Comparison rules** (documented, not bugs): the kernel area below 0x8000f800; `g_psyq_crt_constructors_ran` and the `g_psyq_*_saved_ra` words; the thread records' register
 save areas and stacks; the first 23 words of the scratchpad (the hand-assembled blitters and 64-bit routines park registers and loop temporaries there); a word that holds a

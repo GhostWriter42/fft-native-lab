@@ -41,13 +41,11 @@ def main():
     args = ap.parse_args()
 
     cfg = ['frames 0'] + ([f'hd {args.hd}'] if args.hd >= 2 else []) + ['play 1' if args.verify else 'play 2']
-    cfg_path = play.ROOT / 'build' / 'native' / 'ls' / 'playtest.cfg'
-    cfg_path.parent.mkdir(parents=True, exist_ok=True)
-    cfg_path.write_text('\n'.join(cfg) + '\n')
     shots = play.ROOT / 'build' / 'shots'
     shots.mkdir(parents=True, exist_ok=True)
     name = f'fft-playtest-{os.getpid()}'
-    proc = subprocess.Popen(play.docker_cmd(cfg_path, name), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+    session = play.make_session(name, '\n'.join(cfg) + '\n')
+    proc = subprocess.Popen(play.docker_cmd(session, name), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
     log = []
 
     def drain():
@@ -88,7 +86,8 @@ def main():
             break
         frames += 1
         sizes.add((w, h))
-        if n != last_n + 1 and frames > 1 and sync_frame is None:
+        expect = args.save_at + 1 if last_n == args.load_at else last_n + 1       # a loaded state also restores the frame counter (netplay: both sides agree on frame numbers)
+        if n != expect and frames > 1:
             problems.append(f'frame numbers jump: {last_n} -> {n}')
         last_n = n
         if n == args.save_at - 1:
@@ -103,8 +102,7 @@ def main():
         elif n == args.load_at:
             command = 0x11                                    # load slot 1
             cmd_sent_load = True
-        if cmd_sent_load and n == args.load_at + 1:
-            sync_frame = n                                    # the frame number in the stream continues (the loop counter is not rewound by a quick load)
+        if cmd_sent_load and n == args.save_at + 1:
             after = data
         try:
             proc.stdin.write(struct.pack('<HB', title_pad(n + 1), command))

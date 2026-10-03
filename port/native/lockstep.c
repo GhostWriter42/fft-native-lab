@@ -296,6 +296,9 @@ static int stackish_equal(unsigned x, unsigned y) {                         /* x
     int c = stack_class(x, 1);
     if (c && c == stack_class(y, 0)) return 1;
     if ((x >> 24) == (y >> 24)) { c = stack_class(0x80000000u | (x & 0xffffffu), 1); if (c && c == stack_class(0x80000000u | (y & 0xffffffu), 0)) return 1; }
+    /* the retail battle_thread_call_on_main_stack runs its target on the MAIN stack when a worker thread calls it; the native one calls the target on the worker's own stack (native stacks are
+     * large): a local's address then lies in a thread's stack natively and in the main stack in the original -- the same call (a worker thread = any native class >= 2, original class 1) */
+    if (stack_class(x, 1) >= 2 && stack_class(y, 0) == 1) return 1;
     return 0;
 }
 static void copy_data_interp_to_native(void) {
@@ -351,17 +354,30 @@ static unsigned char interp_ram_bytes(unsigned a) { return interp_ram[a & 0x1fff
  * battle_fixed_cross_product_q12 and their world twins) and the hand-assembled text blitters park their callee-saved registers (s0-s7, v0, v1, s8) there and their loop
  * temporaries (word pointers, bit offsets, strides) and leave them behind; the native versions have no registers to store and need no temporaries. */
 #define SCRATCH_FIRST_COMPARED 23
+/* WLDCORE runs its frame code on a stack IN the scratchpad (wldcore_switch_to_stack): the retail spills are not reproduced natively. While WLDCORE is loaded the scratchpad is not compared;
+ * the words in which the machines differ then are remembered as stale (the original's dead stack frames) and stay out of the comparison until both machines agree on them again (a full
+ * scratchpad copy by the battle AI, say) -- after WLDCORE is evicted (OPEN.BIN after a game over, a battle after the world map) the stale spills would otherwise be reported. */
+static unsigned char g_scratch_stale[256];
+static int scratch_wldcore_active(void) {
+    int i;
+    for (i = 0; i < g_nactive; i++) if (streq(g_modules[g_active[i]].name, "wldcore")) return 1;
+    return 0;
+}
 static int compare_scratch(void) {
-    int i, diffs = 0;
-    for (i = 0; i < g_nactive; i++) if (streq(g_modules[g_active[i]].name, "wldcore")) return 0;   /* WLDCORE runs its frame code on a stack IN the scratchpad (wldcore_switch_to_stack): the retail spills are not reproduced natively */
-    for (i = SCRATCH_FIRST_COMPARED; i < 256; i++) if (((unsigned*)0x1f800000u)[i] != ((unsigned*)cpu.scratch)[i]) diffs++;
+    int i, diffs = 0, wl = scratch_wldcore_active();
+    for (i = SCRATCH_FIRST_COMPARED; i < 256; i++) {
+        unsigned x = ((unsigned*)0x1f800000u)[i], y = ((unsigned*)cpu.scratch)[i];
+        if (x == y) { g_scratch_stale[i] = 0; continue; }
+        if (wl) { g_scratch_stale[i] = 1; continue; }
+        if (!g_scratch_stale[i]) diffs++;
+    }
     return diffs;
 }
 static void print_scratch_diffs(int max) {
     int i, shown = 0;
     for (i = SCRATCH_FIRST_COMPARED; i < 256 && shown < max; i++) {
         unsigned x = ((unsigned*)0x1f800000u)[i], y = ((unsigned*)cpu.scratch)[i];
-        if (x != y) { out("    scratchpad+0x"); outhex((unsigned)i * 4); out("  native "); outhex(x); out("  original "); outhex(y); out("\n"); shown++; }
+        if (x != y && !g_scratch_stale[i]) { out("    scratchpad+0x"); outhex((unsigned)i * 4); out("  native "); outhex(x); out("  original "); outhex(y); out("\n"); shown++; }
     }
 }
 
@@ -394,6 +410,18 @@ static const unsigned g_pad_script[][2] = {
 static unsigned g_frames = MAX_FRAMES;
 static unsigned g_padrt[65536][2];
 static int g_npadrt;
+static unsigned g_padrt2[65536][2];                                              /* run.cfg "pad2 FRAME BUTTONS": the second seat's scripted controller */
+static int g_npadrt2;
+static int g_seats = 1, g_seat_last = -1;                                        /* run.cfg "seats 2": two controllers; in battle the turn of a player-controlled unit that seat 2 owns is played with controller 2 */
+static unsigned g_seat2_units = 0x0aaaaau;                                       /* run.cfg "seat2units MASK": the battle unit slots (bit i = slot i) that seat 2 owns; default: the odd slots */
+static unsigned g_play_pad2;
+static unsigned g_autobattle;                                                   /* run.cfg "autobattle MASK": the units in MASK play by the AI (battle_stats.auto_battle_setting = 1): battles without input */
+static unsigned g_effectmap, g_effectmap_on;                                    /* run.cfg "effectmap SEED": every ability plays one of the documented effect files (effect ids remapped in the ability table) */
+static int g_cdtrace;                                                            /* run.cfg "cdtrace 1": log every CdRead / CdRead2 (native machine) with its frame and sector */
+static int g_trace_abil;                                                         /* run.cfg "traceabil 1": log every ability a unit starts to use */
+static unsigned g_caster, g_caster_seed;                                         /* run.cfg "caster MASK SEED": give the units in MASK a magic skillset and 999 MP (AI casters: effect-overlay coverage) */
+static int g_noframes;                                                           /* run.cfg "noframes 1": play mode sends the frame header only (headless tests: no pixels) */
+static unsigned g_hotseat;                                                       /* run.cfg "hotseat MASK": every frame of a battle the units in MASK (bit i = unit slot i) are made player-controlled (hot-seat / PvP experiments) */
 /* "pokewhen CADDR CVAL ADDR VAL [REPEAT]": once (every time, with REPEAT = 1), at the start of the first frame in which the (interpreter-side) word at CADDR equals CVAL, VAL is stored into the word at ADDR on BOTH
  * machines -- a cheat that steers the game into states random input rarely reaches (for instance, ending the first battle to get to the world map) */
 static struct { unsigned caddr, cval, addr, val, repeat; int done; } g_pokes[64];
@@ -410,6 +438,7 @@ static unsigned g_texdump[6], g_texdump_n;                                      
 static unsigned g_skipcmd[4], g_nskipcmd;                                       /* run.cfg "skipcmd 0x26": do not draw polygons with that command byte (rasteriser debugging) */
 static int g_play, g_native_only;                                               /* run.cfg "play 1": interactive -- every frame goes to stdout, the controller comes from stdin (play.py); "play 2": the same with the native game alone (no original, no comparison); "nativeonly 1": the native game alone, scripted */
 static unsigned g_play_pad;
+static int g_hd_filter = 1;                                                     /* run.cfg "hdfilter 0|1": EPX smoothing of textures on the HD canvases (default on) */
 static int g_hd_s;                                                              /* run.cfg "hd S": the native machine's GPU also renders the display buffers at S times the resolution (2..4) */
 static unsigned short g_hd_canvas[2][320 * 240 * 16];
 static unsigned g_polydump;                                                     /* run.cfg "polydump FRAME": print the tall textured polygons of that frame (debugging the rasteriser) */
@@ -500,10 +529,10 @@ static void parse_path(const char** pp, char* dst, int max) {
 }
 /* every run-configuration variable back to its default (a state loaded from a snapshot overwrote them with the values of the run that saved it; the configuration is read again after a load) */
 static void cfg_reset(void) {
-    g_frames = MAX_FRAMES; g_npadrt = 0; g_npokes = 0;
+    g_frames = MAX_FRAMES; g_npadrt = 0; g_npadrt2 = 0; g_seats = 1; g_seat2_units = 0x0aaaaau; g_hotseat = 0; g_caster = g_caster_seed = 0; g_trace_abil = 0; g_cdtrace = 0; g_effectmap = g_effectmap_on = 0; g_autobattle = 0; g_noframes = 0; g_npokes = 0;
     g_natwatch = 0; g_natwatch_from = 1;
     g_gpu_on = 0; g_shotscale = 1; g_gpu_watch = 0;
-    g_texdump_n = 0; g_nskipcmd = 0; g_play = 0; g_native_only = 0; g_hd_s = 0; g_polydump = 0;
+    g_texdump_n = 0; g_nskipcmd = 0; g_play = 0; g_native_only = 0; g_hd_s = 0; g_hd_filter = 1; g_polydump = 0;
     g_shot_every = 0; g_shot_from = 1; g_nshot_list = 0;
     g_snap_save_frame = 0; g_snap_save_path[0] = 0; g_snap_load_path[0] = 0;
     g_det_frame = g_det_m = g_hash_every = 0;
@@ -511,8 +540,9 @@ static void cfg_reset(void) {
 }
 static void load_run_config(void) {
     static char buf[1 << 21];
-    long n = load_file("/run.cfg", (unsigned char*)buf);
+    long n = load_file("/session/run.cfg", (unsigned char*)buf);               /* a mounted directory (the viewer rewrites it when a second player joins); else the mounted file */
     const char* p = buf;
+    if (n <= 0) n = load_file("/run.cfg", (unsigned char*)buf);
     if (n <= 0 || n >= (long)sizeof buf - 1) return;
     buf[n] = 0;
     while (*p) {
@@ -528,6 +558,7 @@ static void load_run_config(void) {
         else if (p[0] == 't' && p[1] == 'e' && p[2] == 'x') { int q; p += 7; for (q = 0; q < 6; q++) g_texdump[q] = parse_num(&p); g_texdump_n = 1; }      /* texdump FRAME TPX TPY MODE CLUTX CLUTY */
         else if (p[0] == 'p' && p[1] == 'l' && p[2] == 'a') { p += 5; g_play = (int)parse_num(&p); if (g_play) { g_out_fd = 2; g_frames = 0x7fffffffu; g_gpu_on = 1; g_native_only = g_play == 2; } }     /* play 1 */
         else if (p[0] == 'n' && p[1] == 'a' && p[3] == 'i') { p += 10; g_native_only = (int)parse_num(&p); }                                                                                 /* nativeonly 1 */
+        else if (p[0] == 'h' && p[1] == 'd' && p[2] == 'f') { p += 8; g_hd_filter = (int)parse_num(&p); }                                                                                /* hdfilter N */
         else if (p[0] == 'h' && p[1] == 'd') { p += 3; g_hd_s = (int)parse_num(&p); if (g_hd_s > 4) g_hd_s = 4; if (g_hd_s < 2) g_hd_s = 0; }      /* hd S */
         else if (p[0] == 'p' && p[1] == 'o' && p[4] == 'd') { p += 8; g_polydump = parse_num(&p); }                              /* polydump FRAME */
         else if (p[0] == 'g' && p[1] == 'p' && p[3] == 'w') { p += 8; g_gpu_watch_x = (int)parse_num(&p); g_gpu_watch_y = (int)parse_num(&p); g_gpu_watch = 1; }   /* gpuwatch X Y */
@@ -536,6 +567,20 @@ static void load_run_config(void) {
         else if (p[0] == 's' && p[1] == 'h' && p[4] == 'e') { p += 9; g_shot_every = parse_num(&p); g_shot_from = parse_num(&p); if (!g_shot_from) g_shot_from = 1; }   /* shotevery N [FROM] */
         else if (p[0] == 's' && p[1] == 'h' && p[4] == 's') { p += 9; g_shotscale = (int)parse_num(&p); if (g_shotscale < 1) g_shotscale = 1; if (g_shotscale > 3) g_shotscale = 3; }   /* shotscale N */
         else if (p[0] == 'n' && p[1] == 'a') { p += 8; g_natwatch = parse_num(&p); g_natwatch_from = parse_num(&p); if (!g_natwatch_from) g_natwatch_from = 1; }     /* natwatch ADDR [FROM] */
+        else if (p[0] == 'n' && p[1] == 'o') { p += 8; g_noframes = (int)parse_num(&p); }                                                                                                  /* noframes 1 */
+        else if (p[0] == 'a' && p[1] == 'u') { p += 10; g_autobattle = parse_num(&p); }                                                                                              /* autobattle MASK */
+        else if (p[0] == 'e' && p[1] == 'f') { p += 9; g_effectmap = parse_num(&p); g_effectmap_on = 1; }                                                                                /* effectmap SEED */
+        else if (p[0] == 'c' && p[1] == 'd') { p += 7; g_cdtrace = (int)parse_num(&p); }                                                                                          /* cdtrace N */
+        else if (p[0] == 't' && p[1] == 'r') { p += 9; g_trace_abil = (int)parse_num(&p); }                                                                                        /* traceabil N */
+        else if (p[0] == 'c' && p[1] == 'a') { p += 6; g_caster = parse_num(&p); g_caster_seed = parse_num(&p); }                                                                          /* caster MASK SEED */
+        else if (p[0] == 'h' && p[1] == 'o') { p += 8; g_hotseat = parse_num(&p); }                                                                                                       /* hotseat MASK */
+        else if (p[0] == 's' && p[1] == 'e' && p[4] == '2') { p += 10; g_seat2_units = parse_num(&p); }                                                                                /* seat2units MASK */
+        else if (p[0] == 's' && p[1] == 'e') { p += 5; g_seats = (int)parse_num(&p); if (g_seats < 1) g_seats = 1; if (g_seats > 2) g_seats = 2; }                                                /* seats N */
+        else if (p[0] == 'p' && p[1] == 'a' && p[3] == '2') {                                  /* pad2 FRAME BUTTONS */
+            unsigned f, b;
+            p += 4; f = parse_num(&p); b = parse_num(&p);
+            if (g_npadrt2 < 65536) { g_padrt2[g_npadrt2][0] = f; g_padrt2[g_npadrt2][1] = b; g_npadrt2++; }
+        }
         else if (p[0] == 'p' && p[1] == 'a') {                                                 /* pad FRAME BUTTONS */
             unsigned f, b;
             p += 3; f = parse_num(&p); b = parse_num(&p);
@@ -545,13 +590,122 @@ static void load_run_config(void) {
         if (*p) p++;
     }
 }
-static unsigned pad_at(unsigned frame) {
+static int module_active(const char* name);
+/* Two seats (run.cfg "seats 2"): which controller plays now? In battle, while the unit whose turn it is belongs to seat 2 (a slot in g_seat2_units that the game treats as player-controlled:
+ * BATTLE_TEAM_FLAG_PLAYER_CONTROLLED, bit 0x08 of battle_stats.team_flags), controller 2; in every other situation (menus, the world map, events, the AI's turns) controller 1.
+ * Both machines of a lockstep (and both players' instances in a network game) see the same game state, so they route the same way. */
+static int seat_of_turn(void) {
+    int id;
+    if (!module_active("battle")) return 0;
+    id = *(volatile int*)0x8018f520u;                                          /* g_battle_turn_unit_id (s32, -1 between turns) */
+    if (id < 0 || id >= 21) return 0;
+    if (!(*(volatile unsigned char*)(0x801908ccu + (unsigned)id * 0x1c0u + 5u) & 0x08u)) return 0;      /* g_battle_unit_stats[id].team_flags & PLAYER_CONTROLLED */
+    return (g_seat2_units >> id) & 1u ? 1 : 0;
+}
+/* Hot seat (run.cfg "hotseat MASK"): in a battle the game asks for player input only on the turns of units whose team_flags carry BATTLE_TEAM_FLAG_PLAYER_CONTROLLED (0x08; the flag is
+ * stored in the unit's battle_stats_t at +0x05 and copied to its battle_unit_misc_data_t at +0x13d); every other unit is played by the AI. Setting the flag on more units (the AI allies,
+ * or the enemies) turns them into units a second player can play -- with seats 2 the game then waits for controller 2 on those turns. Applied to both machines of a lockstep. */
+static void poke8(unsigned addr, unsigned v) { *(volatile unsigned char*)addr = (unsigned char)v; if (!g_native_only) interp_ram[addr & 0x1fffffu] = (unsigned char)v; }
+static void hotseat_apply(void) {
+    int i;
+    if (!g_hotseat || !module_active("battle")) return;
+    for (i = 0; i < 21; i++) {
+        unsigned a = 0x801908ccu + (unsigned)i * 0x1c0u;
+        unsigned tf = *(volatile unsigned char*)(a + 5), ent = *(volatile unsigned char*)(a + 1);
+        if (((g_hotseat >> i) & 1u) && ent != 0xffu && !(tf & 0x08u)) poke8(a + 5, tf | 0x08u);
+    }
+    for (i = 0; i < 16; i++) {
+        unsigned m = 0x800b7308u + (unsigned)i * 0x440u, bd = *(volatile unsigned*)(m + 0x134u);
+        if (bd >= 0x801908ccu && bd < 0x801908ccu + 21u * 0x1c0u) {
+            unsigned stf = *(volatile unsigned char*)(bd + 5u), mtf = *(volatile unsigned char*)(m + 0x13du);
+            if ((stf & 0x08u) != (mtf & 0x08u)) poke8(m + 0x13du, (mtf & ~0x08u) | (stf & 0x08u));
+        }
+    }
+}
+/* Casters (run.cfg "caster MASK SEED"): the units in MASK (bit i = battle unit slot i) are given a magic skillset -- White / Black / Time / Summon / Steal / Talk / Yin-Yang / Elemental / Jump /
+ * Draw Out / Throw / Math / Sing / Dance / Mimic, chosen by slot and SEED -- and 999 MP every frame, so that the AI uses abilities that have an effect file (the effect overlays are barely
+ * exercised by random play: the basic attack has none). Applied to both machines. */
+static void caster_apply(void) {
+    int i, k;
+    if (!g_caster || !module_active("battle")) return;
+    for (i = 0; i < 21; i++) {
+        unsigned a = 0x801908ccu + (unsigned)i * 0x1c0u;
+        if (!((g_caster >> i) & 1u) || *(volatile unsigned char*)(a + 1) == 0xffu) continue;
+        if (*(volatile unsigned char*)(a + 6u) & 0x20u) continue;                  /* not a monster (the unset placeholder records of a battle that is still being set up are monsters 0x82 / 0xb2) */
+        poke8(a + 0x12u, 0x0au + (unsigned)(i + (int)g_caster_seed) % 15u);        /* primary_skillset: 0x0a..0x18 */
+        poke8(a + 0x2cu, 0xe7u); poke8(a + 0x2du, 0x03u);                          /* mp = 999 */
+        poke8(a + 0x2eu, 0xe7u); poke8(a + 0x2fu, 0x03u);                          /* max_mp = 999 */
+        for (k = 0; k < 57; k++) poke8(a + 0x99u + (unsigned)k, 0xffu);            /* learned_abilities: every ability of every skillset row is known (battle_ai_load_known_ability_flag) */
+    }
+}
+static void effectmap_apply(void) {
+    static unsigned docnum[128];
+    static int ndoc = -1;
+    int i, m;
+    if (!g_effectmap_on || !module_active("battle")) return;
+    if (ndoc < 0) {                                                            /* the effect files that have native code: modules "effect_eNNN" */
+        ndoc = 0;
+        for (m = 0; m < g_module_count && ndoc < 128; m++) {
+            const char* nm = g_modules[m].name;
+            if (nm[0] == 'e' && nm[1] == 'f' && nm[2] == 'f' && nm[3] == 'e' && nm[4] == 'c' && nm[5] == 't' && nm[6] == '_' && nm[7] == 'e') docnum[ndoc++] = (unsigned)((nm[8] - '0') * 100 + (nm[9] - '0') * 10 + (nm[10] - '0'));
+        }
+    }
+    if (!ndoc) return;
+    for (i = 0; i < 512; i++) {                                                /* g_battle_effect_ability_ids[ability]: low half = the effect file number */
+        volatile unsigned* p = (volatile unsigned*)(0x801b63f0u + (unsigned)i * 4u);
+        unsigned want = (*p & 0xffff0000u) | docnum[((unsigned)i + g_effectmap) % (unsigned)ndoc];
+        if (*p != want) { *(volatile unsigned*)p = want; if (!g_native_only) *(unsigned*)(interp_ram + (((unsigned)p) & 0x1fffffu)) = want; }
+    }
+}
+static void autobattle_apply(void) {
+    int i;
+    if (!g_autobattle || !module_active("battle")) return;
+    for (i = 0; i < 21; i++) {
+        unsigned a = 0x801908ccu + (unsigned)i * 0x1c0u;
+        if (!((g_autobattle >> i) & 1u) || *(volatile unsigned char*)(a + 1) == 0xffu || (*(volatile unsigned char*)(a + 6u) & 0x20u)) continue;
+        if (*(volatile unsigned char*)(a + 0x1b8u) != 1u) poke8(a + 0x1b8u, 1u);       /* auto_battle_setting */
+    }
+}
+/* Ability trace (run.cfg "traceabil 1"): every time the ability a unit is using changes (battle_unit_misc_data_t.used_ability_id, +0x138), a line "misc unit U uses ability A" */
+static unsigned short g_abil_last[16];
+static void trace_abilities(int frame) {
+    int i;
+    if (!g_trace_abil || !module_active("battle")) return;
+    for (i = 0; i < 16; i++) {
+        unsigned m = 0x800b7308u + (unsigned)i * 0x440u;
+        unsigned short a = *(volatile unsigned short*)(m + 0x138u);
+        if (a == g_abil_last[i]) continue;
+        g_abil_last[i] = a;
+        if (a) { out("  [frame "); outnum((long)frame); out("] misc record "); outnum(i); out(" (unit "); outnum(*(volatile unsigned char*)(m + 4u)); out(") uses ability 0x"); outhex(a); out("\n"); }
+    }
+}
+static unsigned script_pad(unsigned (*t)[2], int n, unsigned frame) {
     unsigned mask = 0;
     int i;
-    if (g_play) return g_play_pad;
-    if (g_npadrt) { for (i = 0; i < g_npadrt && g_padrt[i][0] <= frame; i++) mask = g_padrt[i][1]; return mask; }
-    for (i = 0; g_pad_script[i][0] != 0xffffffffu; i++) if (g_pad_script[i][0] <= frame) mask = g_pad_script[i][1];
+    for (i = 0; i < n && t[i][0] <= frame; i++) mask = t[i][1];
     return mask;
+}
+static unsigned pad_at(unsigned frame) {
+    unsigned mask = 0, p2 = 0;
+    int i, seat;
+    if (g_play) { mask = g_play_pad; p2 = g_play_pad2; }
+    else {
+        if (g_npadrt) mask = script_pad(g_padrt, g_npadrt, frame);
+        else for (i = 0; g_pad_script[i][0] != 0xffffffffu; i++) if (g_pad_script[i][0] <= frame) mask = g_pad_script[i][1];
+        p2 = script_pad(g_padrt2, g_npadrt2, frame);
+    }
+    if (g_seats < 2) return mask;
+    seat = seat_of_turn();
+    {   static int last_id = -2;                                                /* (debug aid) every change of the turn unit, with its team flags */
+        int id = module_active("battle") ? *(volatile int*)0x8018f520u : -3;
+        if (id != last_id) {
+            last_id = id; out("  [frame "); outnum((long)frame); out("] turn unit "); outnum(id);
+            if (id >= 0 && id < 21) { out(", team_flags 0x"); outhex(*(volatile unsigned char*)(0x801908ccu + (unsigned)id * 0x1c0u + 5u)); out(", auto_battle "); outnum(*(volatile unsigned char*)(0x801908ccu + (unsigned)id * 0x1c0u + 0x1b8u)); }
+            out("\n");
+        }
+    }
+    if (seat != g_seat_last) { g_seat_last = seat; out("  [frame "); outnum((long)frame); out("] controller "); outnum(seat + 1); out(" plays now (turn unit "); outnum(*(volatile int*)0x8018f520u); out(")\n"); }
+    return seat ? p2 : mask;
 }
 /* symbols to watch: their (interpreter-side) 32-bit value is printed whenever it changes (-Watch in lockstep.ps1) */
 struct watch { unsigned addr; const char* name; };
@@ -572,7 +726,10 @@ static void report_watch(int frame) {
     }
 }
 static int g_log_budget = LOG_LIMIT;
+extern hle_t g_hle_native;
+static int g_cur_frame;                                                      /* (tentative definition; the real one is below) */
 static void log_call(void* ctx, const char* what, unsigned a0, unsigned a1, unsigned a2) {
+    if (g_cdtrace && ctx && ((const char*)ctx)[0] == 'n' && (streq(what, "CdRead") || streq(what, "CdRead2"))) { out("  [frame "); outnum((long)g_cur_frame); out("] "); out(what); out(": sectors "); outnum((long)a0); out(" to 0x"); outhex(a1); out(", lba "); outnum((long)g_hle_native.cd_lba); out("\n"); }
     if (g_log_budget > 0) { g_log_budget--; out("    sdk["); out((const char*)ctx); out("] "); out(what); out("("); outhex(a0); out(", "); outhex(a1); out(", "); outhex(a2); out(")\n"); }
 }
 
@@ -1186,21 +1343,32 @@ static void write_shot(const gpu_t* g, const char* tag, int frame) {
         if (!png_write(hpath, hdrgb, w, h, 1)) { out("  could not write "); out(hpath); out("\n"); }
     }
 }
+/* native-only mode: the shots the run configuration asks for ("shot F", "shotevery N") without the comparison of gpu_check_frame */
+static void native_shot_frame(int frame) {
+    int k, want = 0;
+    if (!g_gpu_on) return;
+    for (k = 0; k < g_nshot_list; k++) if (g_shot_list[k] == (unsigned)frame) want = 1;
+    if (g_shot_every && (unsigned)frame >= g_shot_from && ((unsigned)frame - g_shot_from) % g_shot_every == 0) want = 1;
+    if (want) { write_shot(&g_gpu_native, "f", frame); g_shot_count++; }
+}
 /* play mode: send the native machine's display buffer (the HD canvas when there is one) to stdout as 'F' 'R' w(u16) h(u16) frame(u16) + w*h*3 RGB bytes, then wait for the
  * viewer's answer: three bytes = the controller state of the next frame (16 bits, little endian) and a command for the end of this frame (0 none, 1..8 save the state to slot N,
  * 0x11..0x18 load it). The viewer paces the game (it answers when it wants the next frame). */
 static void play_frame(int frame) {
     static unsigned char buf[8 + 1280 * 960 * 3];
-    unsigned char ans[3];
+    unsigned char ans[5];
+    int want = g_seats > 1 ? 5 : 3;
     int w = 0, h = 0, total, off = 0;
-    if (!(g_gpu_native.hd_s > 1 && gpu_display_hd_rgb(&g_gpu_native, buf + 8, &w, &h))) gpu_display_rgb(&g_gpu_native, buf + 8, &w, &h);
+    if (g_noframes) { w = h = 0; }
+    else if (!(g_gpu_native.hd_s > 1 && gpu_display_hd_rgb(&g_gpu_native, buf + 8, &w, &h))) gpu_display_rgb(&g_gpu_native, buf + 8, &w, &h);
     buf[0] = 'F'; buf[1] = 'R'; buf[2] = (unsigned char)w; buf[3] = (unsigned char)(w >> 8); buf[4] = (unsigned char)h; buf[5] = (unsigned char)(h >> 8); buf[6] = (unsigned char)frame; buf[7] = (unsigned char)(frame >> 8);
     total = 8 + w * h * 3;
     while (off < total) { long n = sys3(4, 1, (long)(buf + off), (long)(total - off)); if (n <= 0) sys3(1, 0, 0, 0); off += (int)n; }
     off = 0;
-    while (off < 3) { long n = sys3(3, 0, (long)(ans + off), (long)(3 - off)); if (n <= 0) { out("the viewer closed the pipe: stopping\n"); sys3(1, 0, 0, 0); } off += (int)n; }
+    while (off < want) { long n = sys3(3, 0, (long)(ans + off), (long)(want - off)); if (n <= 0) { out("the viewer closed the pipe: stopping\n"); sys3(1, 0, 0, 0); } off += (int)n; }
     g_play_pad = (unsigned)ans[0] | ((unsigned)ans[1] << 8);
-    g_play_cmd = ans[2];
+    if (want == 5) { g_play_pad2 = (unsigned)ans[2] | ((unsigned)ans[3] << 8); g_play_cmd = ans[4]; }
+    else g_play_cmd = ans[2];
 }
 /* the last (up to 16) writes to the watched VRAM pixel of one machine, oldest first: frame, the SDK call that wrote it with its first two arguments, the value */
 static void print_wlog(const gpu_t* g, const char* who) {
@@ -1398,7 +1566,7 @@ static void gpu_apply_config(void) {                                            
     unsigned q;
     if (!g_gpu_on) { hle_i.gpu = 0; g_hle_native.gpu = 0; return; }
     hle_i.gpu = &g_gpu_orig; g_hle_native.gpu = &g_gpu_native;
-    g_gpu_native.hd_s = g_hd_s; g_gpu_native.hd_w = 320; g_gpu_native.hd_h = 240; g_gpu_native.hd[0] = g_hd_canvas[0]; g_gpu_native.hd[1] = g_hd_canvas[1];
+    g_gpu_native.hd_filter = g_hd_filter; g_gpu_native.hd_s = g_hd_s; g_gpu_native.hd_w = 320; g_gpu_native.hd_h = 240; g_gpu_native.hd[0] = g_hd_canvas[0]; g_gpu_native.hd[1] = g_hd_canvas[1];
     g_gpu_orig.n_skip = g_gpu_native.n_skip = g_nskipcmd;
     for (q = 0; q < g_nskipcmd; q++) g_gpu_orig.skip_cmd[q] = g_gpu_native.skip_cmd[q] = g_skipcmd[q];
     g_gpu_orig.watch_on = g_gpu_native.watch_on = g_gpu_watch; g_gpu_orig.watch_x = g_gpu_native.watch_x = g_gpu_watch_x; g_gpu_orig.watch_y = g_gpu_native.watch_y = g_gpu_watch_y;
@@ -1457,11 +1625,11 @@ static void frame_end(int frame, int* loop_frame) {
     if (g_play_cmd) {
         int c = g_play_cmd;
         g_play_cmd = 0;                                                                /* before the state is written: a loaded state must not carry the command that loads it */
-        if (c >= 1 && c <= 8) { state_path(path, c); snap_save_file(path, (unsigned)frame); }
-        else if (c >= 0x11 && c <= 0x18) {
+        if (c >= 1 && c <= 9) { state_path(path, c); snap_save_file(path, (unsigned)frame); }
+        else if (c >= 0x11 && c <= 0x19) {
             unsigned f;
             state_path(path, c - 0x10);
-            if (restore_state(path, &f)) { out("state "); outnum(c - 0x10); out(" loaded (frame "); outnum((long)f); out(")\n"); }
+            if (restore_state(path, &f)) { *loop_frame = (int)f; out("state "); outnum(c - 0x10); out(" loaded (frame "); outnum((long)f); out(")\n"); }     /* the frame counter continues from the state's frame (netplay: both sides agree on frame numbers) */
             else { out("no usable state in slot "); outnum(c - 0x10); out("\n"); }
         }
     }
@@ -1474,6 +1642,7 @@ static int native_only_overlay(unsigned dst, unsigned sectors, unsigned lba) {
     (void)dst; (void)sectors;
     if (mi < 0) { out("the game loads a code overlay that is not in the module table (LBA "); outnum((long)lba); out(") -- stopping\n"); return 0; }
     blo = g_modules[mi].load; bhi = blo + g_modules[mi].sectors * 2048u;
+    out("frame "); outnum((long)g_cur_frame); out(": the game loads a code overlay ("); out(g_modules[mi].file); out(")\n");
     for (k = 0; k < g_nactive; k++) {
         const struct module* a = &g_modules[g_active[k]];
         unsigned alo = a->load, ahi = a->load + a->sectors * 2048u;
@@ -1536,6 +1705,11 @@ static int main_test(void) {
     /* --- frame by frame --- */
     for (frame = start_frame; frame <= (int)g_frames; frame++) {
         g_cur_frame = frame;
+        hotseat_apply();
+        caster_apply();
+        autobattle_apply();
+        effectmap_apply();
+        trace_abilities(frame);
         g_hle_native.pad_mask = hle_i.pad_mask = pad_at((unsigned)frame);                  /* both machines see the same controller */
         null_page_close();
         {   int q;
@@ -1556,6 +1730,7 @@ static int main_test(void) {
             g_where = rn == HLE_SYNC_OVERLAY ? "overlay load" : "VSync";
             if (rn == HLE_SYNC_OVERLAY && !native_only_overlay(g_hle_native.sync_arg0, g_hle_native.sync_arg1, g_hle_native.sync_arg2)) return 1;
             if (g_play) play_frame(frame);
+            native_shot_frame(frame);
             frame_end(frame, &frame);
             continue;
         }

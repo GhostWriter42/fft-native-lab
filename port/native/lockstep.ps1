@@ -13,9 +13,13 @@
 # -SnapSave 'FRAME:name'   after that frame write the complete state of both machines (RAM, VRAM, interpreter, HLE ...) to port\build\states\name.state;
 #                         -SnapLoad name  start from such a state (same program build only;
 #                         -Frames is then the absolute last frame). Quick scenario starts: save at the frame where a battle turn begins, load it for every trial.
+# -CfgFile PATH  use this ready-made run.cfg instead of generating one from the other flags
 # -NativeOnly  run the native game alone (no original machine, no comparison: several times faster; needs no divergence-free inputs)
 # -DetCheck 'FRAME:M'  determinism self-test (see lockstep.c frame_end): state saved after FRAME, M frames recorded, state loaded, the same M frames replayed, hashes compared
 # -HashEvery N  print a hash of the game state every N frames (run the same inputs twice: the lines must match -- the basis of lockstep multiplayer)
+# -Seats 2 [-Seat2Units MASK] [-Pad2Seed N]  two controllers (co-op groundwork): in battle the turns of the player-controlled units in MASK (bit i = unit slot i, default the odd slots) are played
+#             with controller 2 (scripted random play from -Pad2Seed), everything else with controller 1
+# -Hotseat MASK  (battle) make the units in this slot mask player-controlled every frame, e.g. 0x1e = slots 1-4 (the AI allies of the first battle), 0x3e0 = the enemies in slots 5-9
 # -NatWatch 'sym+off[:FROM_FRAME]'   report every store of the NATIVE game to that word (page protection + single step: slow), with the storing instruction resolved to a function
 # -Replay N   at frame N run the ORIGINAL first, record its function-call sequence, then run the native game under live comparison: the first different call (or a hang) is reported
 # -Dump N     with -Replay: also print the first N calls of the replayed frame (function, first two arguments)
@@ -27,7 +31,7 @@
 #                               are also compared at every function entry (the first entry where the native game's value differs is reported)
 # -BuildOnly  compile and link the program (kept in the docker volume) without running it;  -RunOnly  run the program linked by an earlier build (no generators, no
 #             compilation: soak.ps1 uses this once per random input script). Build flags (-Scenario, -Replay, -Cflags, -Watch ...) are baked into the program.
-param([int]$Frames = 60, [int]$Log = 0, [switch]$Rebuild, [switch]$NoDivFix, [string]$Scenario = '', [string]$Pad = '', [string]$Watch = '', [string]$Peek = '', [int]$Replay = 0, [int]$Dump = 0, [string]$DumpAround = '', [string]$Cflags = '', [int]$PadSeed = 0, [int]$PadFrom = 1180, [switch]$TitleToBattle, [switch]$RunOnly, [switch]$BuildOnly, [int]$Where = 0, [string]$PokeWhen = '', [string]$NatWatch = '', [switch]$Gpu, [string]$Shot = '', [int]$ShotEvery = 0, [int]$ShotFrom = 1, [int]$ShotScale = 1, [string]$GpuWatch = '', [int]$PolyDump = 0, [string]$TexDump = '', [string]$SkipCmd = '', [int]$Hd = 0, [string]$SnapSave = '', [string]$SnapLoad = '', [switch]$NativeOnly, [string]$DetCheck = '', [int]$HashEvery = 0)
+param([int]$Frames = 60, [int]$Log = 0, [switch]$Rebuild, [switch]$NoDivFix, [string]$Scenario = '', [string]$Pad = '', [string]$Watch = '', [string]$Peek = '', [int]$Replay = 0, [int]$Dump = 0, [string]$DumpAround = '', [string]$Cflags = '', [int]$PadSeed = 0, [int]$PadFrom = 1180, [switch]$TitleToBattle, [switch]$RunOnly, [switch]$BuildOnly, [int]$Where = 0, [string]$PokeWhen = '', [string]$NatWatch = '', [switch]$Gpu, [string]$Shot = '', [int]$ShotEvery = 0, [int]$ShotFrom = 1, [int]$ShotScale = 1, [string]$GpuWatch = '', [int]$PolyDump = 0, [string]$TexDump = '', [string]$SkipCmd = '', [int]$Hd = 0, [string]$SnapSave = '', [string]$SnapLoad = '', [switch]$NativeOnly, [string]$DetCheck = '', [int]$HashEvery = 0, [int]$Seats = 1, [string]$Seat2Units = '', [int]$Pad2Seed = 0, [string]$Hotseat = '', [string]$CfgFile = '')
 . (Join-Path $PSScriptRoot 'padgen.ps1')
 $root = Split-Path $PSScriptRoot -Parent
 $repo = Join-Path (Split-Path $root -Parent) 'fft_decomp'
@@ -38,7 +42,8 @@ New-Item -ItemType Directory -Force $nb | Out-Null
 $vol = if ($env:FFT_LS_VOL) { $env:FFT_LS_VOL } else { 'fft-ls-objs' }          # FFT_LS_VOL: another docker volume, for a build that must not disturb a running soak
 # the run configuration (frames, controller script) is read by the program at start-up
 $cfg = Join-Path $nb 'run.cfg'
-[System.IO.File]::WriteAllText($cfg, (New-RunConfig -Frames $Frames -Pad $Pad -PadSeed $PadSeed -PadFrom $PadFrom -TitleToBattle:$TitleToBattle -PokeWhen $PokeWhen -NatWatch $NatWatch -Gpu:$Gpu -Shot $Shot -ShotEvery $ShotEvery -ShotFrom $ShotFrom -ShotScale $ShotScale -GpuWatch $GpuWatch -PolyDump $PolyDump -TexDump $TexDump -SkipCmd $SkipCmd -Hd $Hd -SnapSave $SnapSave -SnapLoad $SnapLoad -NativeOnly:$NativeOnly -DetCheck $DetCheck -HashEvery $HashEvery))
+if ($CfgFile) { $cfg = (Resolve-Path $CfgFile).Path }                        # -CfgFile: a ready-made run.cfg (for instance one written by netplay_test.py --dump-cfg) is used as it is
+else { [System.IO.File]::WriteAllText($cfg, (New-RunConfig -Frames $Frames -Pad $Pad -PadSeed $PadSeed -PadFrom $PadFrom -TitleToBattle:$TitleToBattle -PokeWhen $PokeWhen -NatWatch $NatWatch -Gpu:$Gpu -Shot $Shot -ShotEvery $ShotEvery -ShotFrom $ShotFrom -ShotScale $ShotScale -GpuWatch $GpuWatch -PolyDump $PolyDump -TexDump $TexDump -SkipCmd $SkipCmd -Hd $Hd -SnapSave $SnapSave -SnapLoad $SnapLoad -NativeOnly:$NativeOnly -DetCheck $DetCheck -HashEvery $HashEvery -Seats $Seats -Seat2Units $Seat2Units -Pad2Seed $Pad2Seed -Hotseat $Hotseat)) }
 $shots = Join-Path $root 'build\shots'
 New-Item -ItemType Directory -Force $shots | Out-Null
 $states = Join-Path $root 'build\states'

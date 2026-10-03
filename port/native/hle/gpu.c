@@ -119,9 +119,9 @@ static unsigned fetch(gpu_t* g, int u, int v, int clut_x, int clut_y) {
         unsigned char* rline = &g->rd[row * GPU_VRAM_W];
         unsigned char* rclut = &g->rd[(clut_y & 511) * GPU_VRAM_W];
         switch (g->tp) {
-        case 0: { int tx = (bx + (u >> 2)) & 1023, cx; word = line[tx]; rline[tx] = 1; idx = (word >> ((u & 3) * 4)) & 15u; cx = (clut_x * 16 + (int)idx) & 1023; rclut[cx] = 1; return clut[cx]; }
-        case 1: { int tx = (bx + (u >> 1)) & 1023, cx; word = line[tx]; rline[tx] = 1; idx = (word >> ((u & 1) * 8)) & 255u; cx = (clut_x * 16 + (int)idx) & 1023; rclut[cx] = 1; return clut[cx]; }
-        default: { int tx = (bx + u) & 1023; rline[tx] = 1; return line[tx]; }
+        case 0: { int tx = (bx + (u >> 2)) & 1023, cx; word = line[tx]; if (!g->rd_off) rline[tx] = 1; idx = (word >> ((u & 3) * 4)) & 15u; cx = (clut_x * 16 + (int)idx) & 1023; if (!g->rd_off) rclut[cx] = 1; return clut[cx]; }
+        case 1: { int tx = (bx + (u >> 1)) & 1023, cx; word = line[tx]; if (!g->rd_off) rline[tx] = 1; idx = (word >> ((u & 1) * 8)) & 255u; cx = (clut_x * 16 + (int)idx) & 1023; if (!g->rd_off) rclut[cx] = 1; return clut[cx]; }
+        default: { int tx = (bx + u) & 1023; if (!g->rd_off) rline[tx] = 1; return line[tx]; }
         }
     }
 }
@@ -136,6 +136,59 @@ static void textured_pixel(gpu_t* g, int x, int y, unsigned texel, int cr, int c
         col = rgb555((unsigned)(r > 255 ? 255 : r), (unsigned)(gg > 255 ? 255 : gg), (unsigned)(b > 255 ? 255 : b));
     }
     put_pixel(g, x, y, col, semi && (texel & 0x8000u));
+}
+
+/* ------------------------------------------------------------------------------------------------------ HD texture filter */
+/* EPX ("Scale2x"): a texel is split into 2 x 2 sub-pixels; a sub-pixel takes the colour of the neighbouring texel on its side when the two neighbours around that corner are equal and
+ * the opposite pair is not: the texture's edges stay sharp, diagonal staircases are smoothed. Colours are compared as 16-bit CLUT values (STP bit included, so transparency edges
+ * count as edges). With 4x the filter runs twice (EPX of the EPX-upscaled texture). Only the HD canvases are filtered; the 1x VRAM path is untouched. */
+static unsigned epx_pick(unsigned E, unsigned B, unsigned D, unsigned F, unsigned H, int qx, int qy) {
+    if (B == H || D == F) return E;
+    if (qy == 0) return qx == 0 ? (D == B ? D : E) : (B == F ? F : E);
+    return qx == 0 ? (D == H ? D : E) : (H == F ? F : E);
+}
+static unsigned epx1(gpu_t* g, int u, int v, int qx, int qy, int cx, int cy) {             /* texel (u, v), sub-pixel (qx, qy) */
+    return epx_pick(fetch(g, u, v, cx, cy), fetch(g, u, v - 1, cx, cy), fetch(g, u - 1, v, cx, cy), fetch(g, u + 1, v, cx, cy), fetch(g, u, v + 1, cx, cy), qx, qy);
+}
+/* the texture at fractional texel coordinates: level 1 picks the EPX quadrant, level 2 (hd_s == 4) applies EPX again to the upscaled texture */
+static unsigned hd_texel(gpu_t* g, double uf, double vf, int cx, int cy) {
+    int u = (int)uf, v = (int)vf, qx, qy;
+    double fu, fv;
+    unsigned r;
+    if (uf < 0) u--;
+    if (vf < 0) v--;
+    fu = uf - u; fv = vf - v;
+    qx = fu >= 0.5; qy = fv >= 0.5;
+    g->rd_off = 1;                                                               /* the neighbours are not "read" by the game */
+    if (g->hd_s < 4) r = epx1(g, u, v, qx, qy, cx, cy);
+    else {
+        int U = 2 * u + qx, V = 2 * v + qy, q2x = (int)(fu * 4.0) & 1, q2y = (int)(fv * 4.0) & 1;
+#define HDP(a, b) epx1(g, (a) >> 1, (b) >> 1, (a) & 1, (b) & 1, cx, cy)
+        r = epx_pick(HDP(U, V), HDP(U, V - 1), HDP(U - 1, V), HDP(U + 1, V), HDP(U, V + 1), q2x, q2y);
+#undef HDP
+    }
+    g->rd_off = 0;
+    return r;
+}
+static unsigned hd_modulate(unsigned texel, int cr, int cg, int cb, int raw) {             /* the texel colour of textured_pixel (modulation unless raw) */
+    int r, gg, b;
+    if (raw) return texel & 0x7fffu;
+    r = (int)((texel & 31) << 3) * cr >> 7; gg = (int)(((texel >> 5) & 31) << 3) * cg >> 7; b = (int)(((texel >> 10) & 31) << 3) * cb >> 7;
+    return rgb555((unsigned)(r > 255 ? 255 : r), (unsigned)(gg > 255 ? 255 : gg), (unsigned)(b > 255 ? 255 : b));
+}
+/* a textured sprite on the HD grid (the 1x path has drawn it already, without touching the canvas): every HD pixel samples the filtered texture */
+static void hd_rect(gpu_t* g, int x, int y, int w, int h, int raw, int semi, int cr, int cg, int cb, int u0, int v0, int clut_x, int clut_y) {
+    int k = hd_index(g), S = g->hd_s, bx, by, bx0, bx1, by0, by1;
+    if (k < 0) return;
+    bx0 = (imax(x, g->clip_x1) - g->hd_fx[k]) * S; bx1 = (imin(x + w - 1, g->clip_x2) + 1 - g->hd_fx[k]) * S - 1;
+    by0 = (imax(y, g->clip_y1) - g->hd_fy[k]) * S; by1 = (imin(y + h - 1, g->clip_y2) + 1 - g->hd_fy[k]) * S - 1;
+    for (by = by0; by <= by1; by++)
+        for (bx = bx0; bx <= bx1; bx++) {
+            double uf = u0 + (double)(bx - (x - g->hd_fx[k]) * S) / S, vf = v0 + (double)(by - (y - g->hd_fy[k]) * S) / S;
+            unsigned texel = hd_texel(g, uf, vf, clut_x, clut_y);
+            if (texel == 0) continue;
+            hd_put(g, k, bx, by, hd_modulate(texel, cr, cg, cb, raw), semi && (texel & 0x8000u));
+        }
 }
 
 /* ------------------------------------------------------------------------------------------------------- triangles */
@@ -201,8 +254,9 @@ static void hd_tri(gpu_t* g, vtx_t a, vtx_t b, vtx_t c, int textured, int semi, 
             if (wa < bias_a || wb < bias_b || wc < bias_c) continue;
             r = HD_DIV(wa * a.r + wb * b.r + wc * c.r, area); gg = HD_DIV(wa * a.g + wb * b.g + wc * c.g, area); bb = HD_DIV(wa * a.b + wb * b.b + wc * c.b, area);
             if (textured) {
-                int u = HD_DIV(wa * a.u + wb * b.u + wc * c.u, area), v = HD_DIV(wa * a.v + wb * b.v + wc * c.v, area);
-                unsigned texel = fetch(g, u, v, clut_x, clut_y);
+                unsigned texel;
+                if (g->hd_filter) texel = hd_texel(g, (double)(wa * a.u + wb * b.u + wc * c.u) / (double)area, (double)(wa * a.v + wb * b.v + wc * c.v) / (double)area, clut_x, clut_y);
+                else texel = fetch(g, HD_DIV(wa * a.u + wb * b.u + wc * c.u, area), HD_DIV(wa * a.v + wb * b.v + wc * c.v, area), clut_x, clut_y);
                 if (texel == 0) continue;
                 if (raw) col = texel & 0x7fffu;
                 else {
@@ -216,8 +270,9 @@ static void hd_tri(gpu_t* g, vtx_t a, vtx_t b, vtx_t c, int textured, int semi, 
 
 /* ---------------------------------------------------------------------------------------------- rectangles, lines */
 static void draw_rect(gpu_t* g, int x, int y, int w, int h, int textured, int raw, int semi, int cr, int cg, int cb, int u0, int v0, int clut_x, int clut_y) {
-    int xx, yy;
+    int xx, yy, hdpass = textured && g->hd_s > 1 && g->hd_filter;
     x += g->ofs_x; y += g->ofs_y;
+    if (hdpass) g->hd_skip = 1;                                                 /* the canvas gets the filtered sprite below, not 1x blocks */
     for (yy = 0; yy < h; yy++) {
         if (y + yy < g->clip_y1 || y + yy > g->clip_y2) continue;
         for (xx = 0; xx < w; xx++) {
@@ -226,6 +281,7 @@ static void draw_rect(gpu_t* g, int x, int y, int w, int h, int textured, int ra
             else put_pixel(g, x + xx, y + yy, rgb555((unsigned)cr, (unsigned)cg, (unsigned)cb), semi);
         }
     }
+    if (hdpass) { g->hd_skip = 0; hd_rect(g, x, y, w, h, raw, semi, cr, cg, cb, u0, v0, clut_x, clut_y); }
 }
 static int iabs(int v) { return v < 0 ? -v : v; }
 static void draw_line(gpu_t* g, vtx_t a, vtx_t b, int shaded, int semi) {

@@ -12,10 +12,22 @@ Started 2026-09-29 (evening). Last updated 2026-09-30 (late). Newest status at t
 * **Save states of the whole machine** (F1-F8 in the viewer, `-SnapSave` / `-SnapLoad` in the harness, 0.8-11 MB): instant save / load, scenario starts without replaying 11,000 frames.
 * **Determinism, measured**: replaying 1,700 battle frames from a saved state gives identical state hashes at every frame, and two independent processes fed the same inputs for 11,000 frames
   print identical state hashes -- the prerequisite for lockstep multiplayer (a leaked host stack pointer was the only thing in the way, fixed).
-* **HD canvas prototype** (`-Hd 2..4`): 3D polygons on a finer grid, verified against the 1x path (8,300 frames, RAM and VRAM identical); 2D art is only pixel-doubled, the CPU rasteriser is too slow
-  for real time -- the plumbing for a GPU renderer + replacement art, not HD art itself.
+* **HD canvas** (`-Hd 2..4`): 3D polygons on a finer grid and sprites / UI text / map textures sampled with an **EPX (Scale2x) filter** (twice at 4x): crisp, smoothed edges at 2x-4x -- see
+  `port\samples\native-frames\09-...` (4x, 1024x960) and `10-` / `11-` (filter on / off). Verified against the 1x path (8,300 frames + 3,000 frames with the filter, RAM and VRAM identical).
+  The art is still the PS1's textures and the CPU rasteriser is too slow for real time: this is the plumbing and a first visible result for a GPU renderer + replacement art.
 * Long soak finished: **40 of 40 seeds x 60,000 frames identical** (the 5 earlier failures were dead stack garbage); final-binary regression 16 of 16 x 12,000 with VRAM compared.
 * Two driver bugs found and fixed on the way (a fixed mapping overlapping the growing `.bss`; log lines reaching the frame stream).
+* **Two players (prototype, `NATIVE-RUNTIME.md` "Result 6")**: the game already separates player-controlled units from AI units (one flag per unit), so a second controller is routed by
+  turn ownership (`seats 2`); with the AI allies of the first battle flagged, the game waits for controller 2 on their turns -- verified against the original machine code for 14,000 frames.
+  **Input-delay lockstep over a TCP socket** (`netplay.py`, `play.py --host/--join`): two native instances, only controllers + a state hash every 60 frames cross the wire; the headless test
+  (`netplay_test.py`) ran 14,000 frames with 233 identical state-hash samples (and a jittery-link variant). Not covered: real network conditions, joining a running game, PvP with the enemies as
+  player units (runs code retail never runs; native and original differ there). **Joining a game in progress** now works too (`play.py --invite` / `--join`: the host's whole-machine state is
+  sent over the link; headless test with the real viewer code: joined at frame ~1,800, 40 state-hash comparisons matched over the next 2,400 frames).
+* **A new scenario generator**: `g_battle_entd_selection_mode = 3` (a `-PokeWhen` cheat) makes the game draw a random encounter from ENTD sets 1-59 for the first battle, so every random-play
+  seed plays a different battle (a Chocobo on the player's side, other jobs ...): a cheap way to reach code the first battle never does. Two comparison rules were too strict (a function that
+  retail runs on the main stack runs on the worker's own stack natively; WLDCORE's dead stack spills in the scratchpad after it is evicted) and were relaxed; then **24 of 24 random-encounter seeds
+  x 14,000 frames identical**, and 16 of 16 seeds x 12,000 frames from battle-start states with AI casters + auto-battle (`caster`, `autobattle`). Effect overlays stayed unreached: only 110 of the
+  effect files have native code, and the abilities the AI used load other files (so function-level effect fuzzing or decomp progress is the way, not more scenarios).
 
 The decomp's C (plus a short list of reviewed patches for places where it relied on what the 1990s MIPS compiler happened to do) is compiled with a modern compiler into a
 32-bit program that runs the **whole game** -- boot, title menu, new game, name entry, the opening events, the first battle, and (with a cheat that ends that battle) the world

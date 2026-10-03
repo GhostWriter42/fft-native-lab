@@ -68,7 +68,7 @@ function New-PokeLines([string]$PokeWhen) {
     return $lines
 }
 
-function New-RunConfig([int]$Frames, [string]$Pad = '', [int]$PadSeed = 0, [int]$PadFrom = 1180, [switch]$TitleToBattle, [string]$PokeWhen = '', [string]$NatWatch = '', [switch]$Gpu, [string]$Shot = '', [int]$ShotEvery = 0, [int]$ShotFrom = 1, [int]$ShotScale = 1, [string]$GpuWatch = '', [int]$PolyDump = 0, [string]$TexDump = '', [string]$SkipCmd = '', [int]$Hd = 0, [string]$SnapSave = '', [string]$SnapLoad = '', [switch]$NativeOnly, [string]$DetCheck = '', [int]$HashEvery = 0) {
+function New-RunConfig([int]$Frames, [string]$Pad = '', [int]$PadSeed = 0, [int]$PadFrom = 1180, [switch]$TitleToBattle, [string]$PokeWhen = '', [string]$NatWatch = '', [switch]$Gpu, [string]$Shot = '', [int]$ShotEvery = 0, [int]$ShotFrom = 1, [int]$ShotScale = 1, [string]$GpuWatch = '', [int]$PolyDump = 0, [string]$TexDump = '', [string]$SkipCmd = '', [int]$Hd = 0, [string]$SnapSave = '', [string]$SnapLoad = '', [switch]$NativeOnly, [string]$DetCheck = '', [int]$HashEvery = 0, [int]$Seats = 1, [string]$Seat2Units = '', [int]$Pad2Seed = 0, [string]$Hotseat = '') {
     $all = [System.Collections.Generic.List[object]]::new()
     $n = 0
     if ($Pad) {
@@ -78,6 +78,12 @@ function New-RunConfig([int]$Frames, [string]$Pad = '', [int]$PadSeed = 0, [int]
     if ($PadSeed -gt 0) { foreach ($e in (New-RandomPad $PadSeed $PadFrom $Frames)) { $all.Add([pscustomobject]@{ F = [int]$e[0]; N = $n++; B = $e[1] }) } }
     $lines = @("frames $Frames") + (New-PokeLines $PokeWhen)
     foreach ($c in ($SkipCmd -split ',' | Where-Object { $_ })) { $lines += "skipcmd $([int]$c)" }       # rasteriser debugging: polygon command bytes that are not drawn
+    if ($Seats -ge 2) {                                                                               # two controllers: seat 2 plays the turns of the battle units in Seat2Units (bit i = unit slot i; default: the odd slots)
+        $lines += "seats $Seats"
+        if ($Seat2Units) { $lines += "seat2units $Seat2Units" }
+        if ($Pad2Seed -gt 0) { foreach ($e in (New-RandomPad $Pad2Seed $PadFrom $Frames)) { $lines += "pad2 $($e[0]) $($e[1])" } }       # seat 2's scripted random play (the same generator as seat 1, another seed)
+    }
+    if ($Hotseat) { $lines += "hotseat $Hotseat" }                                                   # make the battle units in this slot mask player-controlled (hot-seat / PvP experiments)
     if ($NativeOnly) { $lines += 'nativeonly 1' }                                                     # run the native game alone (no original machine, no comparison)
     if ($DetCheck) { $dq = $DetCheck -split ':'; $lines += ('detcheck {0} {1}' -f [int]$dq[0], [int]$dq[1]) }       # determinism self-test: save the state after frame F, run M frames, load it, run them again: equal state hashes every frame
     if ($HashEvery) { $lines += "hashevery $HashEvery" }                                               # print a hash of the game state every N frames (two runs of the same inputs must print the same lines)
