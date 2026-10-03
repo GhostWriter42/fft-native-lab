@@ -4,9 +4,17 @@ Started 2026-09-29 (evening). Last updated 2026-09-30 (late). Newest status at t
 
 ## Latest: the native game draws real frames, bit-identical with the original code -- and now runs alone, saves its state and is deterministic
 
-**Newest (2026-10-03):** the long soak (32 seeds x 40,000 frames, sound driver running) found 3 divergences, all in the equipment screen: four native-only bugs (a stack buffer overflow
-that corrupted a saved register, three arguments that retail passes through registers). Fixed with exact, reviewed patches on the generated copy only (`NATIVE-RUNTIME.md` "Result 8");
-afterwards **32 of 32 identical**. Also committed: `HOW-TO-PLAY.md` and a double-click launcher `Play FFT.bat`. Nothing pushed or published.
+**Newest (2026-10-03, in order):**
+
+1. *Correctness*: the long soak found 4 native-only bugs in the equipment screen (a stack buffer overflow into a saved register, three arguments that retail passes through registers) and one compiler hazard (a null test after a dereference, deleted by modern gcc; now `-fno-delete-null-pointer-checks`); fixed by reviewed patches on the generated copy (`NATIVE-RUNTIME.md` Results 8). 32/32 random-battle, 32/32 world-map and 32/32 AI-caster seeds identical.
+2. *Upstream moved*: the decomp's maintainer fixed many of the same retail-register problems independently (2b09e33). The port was rebased onto our `remove-unneeded-pins-and-barriers` branch on top of it: 14 of 48 patches dropped, 2 rewritten, 34 remain; 32/32 seeds identical.
+3. *Publishing*: the work is split into upstream candidates (a fork with three byte-exact branches, default branch `fork` with an about-this-fork notice) and the experiments (`fft-native-lab`, MIT, scrubbed of game-derived files by `port/tools/export_public.py`). Both are public under GhostWriter42; no pull request or message has been sent to upstream.
+4. *GPU renderer + viewer*: the game records its GPU command trace, OpenGL replays it on the graphics card (`play.ps1 -Gl`, 1x-4x), verified pixel by pixel against the software GPU (~54,000 frames, 1-pixel outline differences only); two bugs found on the way (primitive order of semi-transparent draws; half-pixel texture offset at 2x).
+5. *Sound*: the sound was heard for the first time ("pixelated"): cubic resampling across ADPCM blocks and audio-clock pacing fixed it ("sounds normal now").
+6. *New Game flashing / text-less name entry*: found with the viewer's own diagnostics (input logging, replay, record, compare): a platform-layer fidelity bug, not the native build -- `PutDrawEnv`/`PutDispEnv`/`ResetGraph` did not keep libgpu's state (`NATIVE-RUNTIME.md` Result 10). Fixed; regression soaks identical.
+7. *Tooling for several agents*: a gitignored progress store (`.agents/`) with workstreams, locks and a CLI; Docker's VM memory capped (`.wslconfig`, 8 GB, auto-reclaim).
+
+Open: the opening scene's terrain renders red (next task), the platform-layer audit of every replaced SDK call, replayable gameplay scenes, two-player hooks in the GPU viewer, texture filtering. Details of each: `NATIVE-RUNTIME.md` Results 8-10 and the README's "Known issues / next".
 
 **New (night of 2026-09-30, details in `NATIVE-RUNTIME.md` "Result 5"):**
 
