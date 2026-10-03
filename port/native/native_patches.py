@@ -289,4 +289,19 @@ PATCHES = [
         new='    work.past_the_end = 0;\n    do {\n        work.target_coords.bytes.x = ai->acting_unit_coords.bytes.x + g_battle_ai_facing_tile_offsets.bytes[offset];',
         why='see the first entry: the past-the-end byte of the viability array is zero.',
     ),
+    # --- NULL-pointer reads of console low RAM (a build that cannot map page zero, i.e. the Windows port, needs these; the oracle's low RAM reads as zero)
+    dict(
+        file='src/battle/battle_menu_build_unit_portrait_poly.c',
+        old='    if (battle_unit_get_stats_from_battle_id(battle_id)->unit_id == g_main_special_portrait_unit_id) {',
+        new='    if ((battle_unit_get_stats_from_battle_id(battle_id) ? battle_unit_get_stats_from_battle_id(battle_id)->unit_id : 0) == g_main_special_portrait_unit_id) {',
+        why='battle_unit_get_stats_from_battle_id returns NULL for an id >= 21 (every lockstep seed reaches it: the NULL-page report lists battle_menu_build_unit_portrait_poly+46); retail reads '
+            'unit_id (+0x161) from console low RAM, which is zero in the oracle. Explicit zero.',
+    ),
+    dict(
+        file='src/battle/battle_unit_init_misc_data.c',
+        old='        unit->battle_data->equipment[UNIT_EQUIPMENT_SLOT_RIGHT_HAND_WEAPON], unit);\n    battle_status_init_special_flag_enabling(unit->battle_data->misc_unit_id);',
+        new='        unit->battle_data ? unit->battle_data->equipment[UNIT_EQUIPMENT_SLOT_RIGHT_HAND_WEAPON] : 0, unit);\n    battle_status_init_special_flag_enabling(unit->battle_data ? unit->battle_data->misc_unit_id : 0);',
+        why='battle_unit_init_misc_data is called with stats == NULL for some units (it guards stats != 0 at the palette step); the end of the function then reads equipment[] and misc_unit_id '
+            'through the NULL battle_data (NULL-page report: battle_unit_init_misc_data+1441). Retail reads zeros from low RAM; explicit zeros.',
+    ),
 ]

@@ -45,7 +45,7 @@ for s in /port/native/gte/libgte_native.c $P/rsin.c $P/sin_1.c $P/rcos.c $P/rata
   rename_defs "$o"
 done
 # the HLE of the SDK hardware layer defines native_<name> for every SDK function it takes over (generated), plus the shared implementation
-for s in /port/native/gte/gte.c /port/native/r3000/r3000.c /port/native/hle/hle.c /port/native/hle/gpu.c $N/hle_generated.c $N/modules.c $N/sym_table.c /port/native/bios_rt.c /port/native/lockstep.c; do
+for s in /port/native/gte/gte.c /port/native/r3000/r3000.c /port/native/hle/hle.c /port/native/hle/gpu.c /port/native/hle/spu.c $N/hle_generated.c $N/modules.c $N/sym_table.c /port/native/bios_rt.c /port/native/lockstep.c; do
   gcc $CF -c "$s" -o "$W/x_$(basename "$s" .c).o"
 done
 gcc $CF -c /port/native/rt.c -o $W/x_rt.o

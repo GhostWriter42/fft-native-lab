@@ -40,7 +40,7 @@ def main():
     ap.add_argument('--load-at', type=int, default=900)
     args = ap.parse_args()
 
-    cfg = ['frames 0'] + ([f'hd {args.hd}'] if args.hd >= 2 else []) + ['play 1' if args.verify else 'play 2']
+    cfg = ['frames 0', 'audio 1'] + ([f'hd {args.hd}'] if args.hd >= 2 else []) + ['play 1' if args.verify else 'play 2']
     shots = play.ROOT / 'build' / 'shots'
     shots.mkdir(parents=True, exist_ok=True)
     name = f'fft-playtest-{os.getpid()}'
@@ -66,6 +66,7 @@ def main():
 
     t0 = time.time()
     frames = 0
+    audio_bytes = 0
     last_n = 0
     saved_at = None
     before = None
@@ -75,12 +76,14 @@ def main():
     cmd_sent_load = False
     sync_frame = None
     while frames < args.frames:
-        hdr = read_exact(8)
+        hdr = read_exact(10)
         if hdr is None or hdr[:2] != b'FR':
             problems.append(f'stream ended or malformed after {frames} frames: header {hdr!r}')
             break
-        w, h, n = struct.unpack('<HHH', hdr[2:8])
+        w, h, n, ab = struct.unpack('<HHHH', hdr[2:10])
         data = read_exact(w * h * 3)
+        if ab:
+            audio_bytes += len(read_exact(ab))
         if data is None:
             problems.append('short frame data')
             break
@@ -125,6 +128,7 @@ def main():
             print('  driver:', line[:200])
     saved = any('snapshot of frame' in l for l in log)
     loaded = any('loaded (frame' in l for l in log)
+    print('audio bytes received:', audio_bytes)
     print('state saved:', saved, ' state loaded:', loaded)
     if not saved:
         problems.append('no snapshot line in the driver log')

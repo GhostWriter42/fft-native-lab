@@ -34,6 +34,7 @@ from PIL import Image, ImageTk
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import netplay  # noqa: E402
+from audio_out import AudioOut  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]                  # port/
 REPO = ROOT.parent / 'fft_decomp'
@@ -75,6 +76,7 @@ def main():
     ap.add_argument('--hotseat', default='0x1e', help='two players (the host decides): battle unit slots made player-controlled, as a bit mask (default: the AI allies of the first battle)')
     ap.add_argument('--seat2', default='0x1a', help='two players (the host decides): battle unit slots that player 2 plays, as a bit mask')
     ap.add_argument('--random-battle', action='store_true', help='two players (the host decides): the first battle is a random encounter from ENTD sets 1-59 (cheat)')
+    ap.add_argument('--mute', action='store_true', help='no sound')
     ap.add_argument('--test-frames', type=int, default=0, help='headless self-test: no window is shown, the title-to-battle controller script is played, the program exits after N frames and prints a summary')
     args = ap.parse_args()
 
@@ -83,7 +85,7 @@ def main():
 
     def net_cfg():
         cheat = ['pokewhen 0x800459dc 0 0x800459dc 3 1'] if args.random_battle else []
-        return '\n'.join(['frames 0', 'seats 2', f'seat2units {args.seat2}', f'hotseat {args.hotseat}', 'hashevery 60'] + cheat + ([f'hd {min(args.hd, 4)}'] if args.hd >= 2 else []) + ['play 2']) + '\n'
+        return '\n'.join(['frames 0', 'seats 2', f'seat2units {args.seat2}', f'hotseat {args.hotseat}', 'hashevery 60', 'audio 1'] + cheat + ([f'hd {min(args.hd, 4)}'] if args.hd >= 2 else []) + ['play 2']) + '\n'
 
     net = None                                              # the lockstep link once a second player is in the game
     need_load = False                                       # the joiner of a game in progress: load the host's state at the first frame
@@ -113,7 +115,7 @@ def main():
     elif args.cfg:
         cfg_text = Path(args.cfg).read_text()
     else:
-        cfg_text = '\n'.join(['frames 0'] + ([f'hd {min(args.hd, 4)}'] if args.hd >= 2 else []) + ['play 2']) + '\n'
+        cfg_text = '\n'.join(['frames 0', 'audio 1'] + ([f'hd {min(args.hd, 4)}'] if args.hd >= 2 else []) + ['play 2']) + '\n'
     if args.invite:
         inv['phase'] = 'idle'
         srv = socket.socket()
@@ -135,6 +137,10 @@ def main():
     shots.mkdir(parents=True, exist_ok=True)
     log_path = ROOT / 'build' / 'native' / 'ls' / 'play.log'
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    audio = None if (args.mute or args.test_frames) else AudioOut()
+    if audio is not None and not audio.ok:
+        print('no audio device: playing without sound')
+        audio = None
     proc = subprocess.Popen(docker_cmd(session, name), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
 
     state = {'frame': None, 'closed': False, 'paused': False, 'last_rgb': None, 'err': '', 'cmd': 0, 'n': 0, 'who': 1}
@@ -153,13 +159,19 @@ def main():
 
     def reader():
         while True:
-            hdr = read_exact(8)
+            hdr = read_exact(10)
             if hdr is None or hdr[:2] != b'FR':
                 break
-            w, h, n = struct.unpack('<HHH', hdr[2:8])
+            w, h, n, ab = struct.unpack('<HHHH', hdr[2:10])
             data = read_exact(w * h * 3)
             if data is None:
                 break
+            if ab:
+                snd = read_exact(ab)
+                if snd is None:
+                    break
+                if audio:
+                    audio.write(snd)
             with lock:
                 state['frame'] = (w, h, n, data)
         state['closed'] = True
@@ -329,6 +341,8 @@ def main():
         root.after(int(delay * 1000), send_pad)
 
     def on_close():
+        if audio:
+            audio.close()
         try:
             proc.stdin.close()
         except OSError:

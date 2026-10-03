@@ -54,11 +54,14 @@ typedef struct hle {
     unsigned vsync_left;                                                        /* blanks still owed by a VSync(n) call being re-executed (interp_reexec) */
     int reexec;                                                                 /* set: the driver must re-execute the HLE call instead of returning from it */                                               /* entries in use / calls that did not fit */
     hle_event_t ev[HLE_EVENTS];
+    int in_cb;                                                                  /* inside a vertical-blank callback / event handler */
+    unsigned rcnt2_handler, rcnt2_slot;                                         /* the sound driver's root-counter-2 event handler (called four times per vertical blank) and its event slot */
     unsigned pad_mask;                                                          /* controller 1 buttons as PadRead() returns them (set by the driver's input script) */
     unsigned bad_ot_addr, bad_ot_tag, bad_ot_head;                              /* first broken ordering-table chain seen: the tag word's address and value, and the table's head */
     /* what the frame's first DrawOTag calls drew, for diagnosing a mismatch of their hashes: per call the packets as {address, length, words...} */
     struct hle_otdump { unsigned trace_idx, n; unsigned w[HLE_OTDUMP_WORDS]; } otdump[HLE_OTDUMPS];
     unsigned otdump_n;
+    struct spu* spu;                                                            /* optional software SPU (spu.h): when set, the libspu calls drive its voices (audio output) */
     struct gpu* gpu;                                                            /* optional software GPU (gpu.h): when set, the drawing calls render into its VRAM */
 } hle_t;
 enum { HLE_SYNC_NONE = 0, HLE_SYNC_VSYNC = 1, HLE_SYNC_OVERLAY = 2, HLE_SYNC_DIVERGED = 3 };

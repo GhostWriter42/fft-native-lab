@@ -272,8 +272,26 @@ Regression after all of this: 16 of 16 seeds x 12,000 frames identical with RAM 
   to documented effect files (`effectmap`) made the native build crash at the first effect (a jump into data at `g_battle_ai_unit_crystal_treasure_status+78`; not analysed yet: probably a
   function of an undocumented file, or an effect that needs state the remapped ability does not provide). Effect coverage therefore needs a function-level fuzz of the effect files or more
   decomp progress, not more scenarios.
+
 * *Persistent shared world (MMO-ish):* nothing here supports it. The game is one save (world map, party, story flags, battles as instances); lockstep shares ONE such game between 2-4 players.
   A shared world would be a server-side reimplementation of the world state around battle instances.
+
+**Result 7: sound** (2026-10-02; `hle/spu.c`, `audio_out.py`, run.cfg `audio 1` / `audiodump PATH`, `play.py --mute`).
+
+* *The music driver was not running at all:* the game's sound driver (Suzuki) advances its sequencer and sound effects from a **root-counter-2 event handler** (`SuzukiSPUInitialiser`:
+  `OpenEvent(0xf2000002, ..., main_sound_root_counter_2_handler)`, `SetRCnt(.., 0x44e8, ..)` = 240 Hz), which the HLE never called. It now calls that handler four times per vertical
+  blank on BOTH machines of the lockstep. The whole sequencer (the `main_smd_*` / `main_sound_*` functions, ~1,000 of them) therefore runs natively and is verified against the original
+  at every frame, including every SDK call it makes into the SPU (voice volume / pitch / address / ADSR, key on / off, pitch-LFO / noise / reverb voice masks): 3,000 frames identical.
+  (A harness fix was needed: the original does not trace SDK calls made inside a re-executed `VSync(n)`; calls made from the callbacks are now traced either way.)
+* *The sound chip* (`spu.c`, native machine only, never feeding anything back to the game): the libspu calls update a register model exactly as the decomp's libspu sources do
+  (`SpuSetVoiceVolume` masks, `SpuSetVoiceARAttr` / `SRAttr` / `RRAttr` bit layouts, `SpuSetKey`, transfers into the 512 KiB sound RAM with `SpuWrite`); 24 voices decode ADPCM
+  (the five filters, loop / end / repeat flags), play at `pitch / 0x1000` with linear interpolation, run the hardware-style ADSR (linear / exponential, the rate counters) and mix at
+  44.1 kHz stereo with per-voice and main volume; 735 samples per frame. The **reverb unit** is modelled too (the 22 kHz comb / all-pass network of the hardware, fed with the game's own
+  preset tables `_spu_rev_param` / `_spu_rev_startaddr` when `SpuSetReverbModeParam` selects a mode; depth from `SpuSetReverbDepth`; a reverb tail is visible in the dump after the music stops;
+  the echo / delay modes' delay-feedback tuning is not applied). **Not modelled:** noise, pitch modulation, volume sweeps, CD-XA audio.
+* *Result:* a 200-second native run from the title through the opening and into the first battle keys on 4,119 notes; the level follows the music (RMS 400-10,000, tonal
+  zero-crossing rates, a few clipped bass peaks). **Nobody has listened to it yet** -- play.py streams the audio to the Windows waveOut API (ctypes, no packages;
+  `audio_selftest.py` checks the device with silence) and `audiodump` + `tools/wavstat.py` / `wavzcr.py` write and measure raw dumps.
 
 **Comparison rules** (documented, not bugs): the kernel area below 0x8000f800; `g_psyq_crt_constructors_ran` and the `g_psyq_*_saved_ra` words; the thread records' register
 save areas and stacks; the first 23 words of the scratchpad (the hand-assembled blitters and 64-bit routines park registers and loop temporaries there); a word that holds a

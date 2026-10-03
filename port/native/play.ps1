@@ -38,5 +38,5 @@ New-Item -ItemType Directory -Force $cfgDir | Out-Null
 $cfg = Join-Path $cfgDir 'play.cfg'
 $text = New-RunConfig -Frames 0 -PokeWhen $poke -Gpu -Hd $Hd
 $mode = if ($Verify) { 1 } else { 2 }
-[System.IO.File]::WriteAllText($cfg, ($text.TrimEnd() + "`nplay $mode`n"))
+[System.IO.File]::WriteAllText($cfg, ($text.TrimEnd() + "`naudio 1`nplay $mode`n"))
 python (Join-Path $PSScriptRoot 'play.py') --scale $Scale --cfg $cfg

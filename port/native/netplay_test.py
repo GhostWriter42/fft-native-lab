@@ -110,10 +110,12 @@ class Player(threading.Thread):
         rng = random.Random(1000 + self.idx)
         try:
             while self.last_n < self.frames:
-                hdr = self._read(8)
-                w, h, n = struct.unpack('<HHH', hdr[2:8])
+                hdr = self._read(10)
+                w, h, n, ab = struct.unpack('<HHHH', hdr[2:10])
                 if w * h:
                     self._read(w * h * 3)
+                if ab:
+                    self._read(ab)
                 self.last_n = n
                 if self.jitter:
                     time.sleep(rng.random() * self.jitter)

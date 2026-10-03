@@ -1,6 +1,7 @@
 /* HLE of the PlayStation SDK hardware layer -- see hle.h. */
 #include "hle.h"
 #include "gpu.h"
+#include "spu.h"
 
 static int streq(const char* a, const char* b) { while (*a && *a == *b) { a++; b++; } return *a == *b; }
 static unsigned bcd(unsigned v) { return (v >> 4) * 10 + (v & 15); }
@@ -12,12 +13,21 @@ void hle_init(hle_t* h, const hle_platform_t* p) {
     h->p = *p;
 }
 
+/* One vertical blank: the game's VSync callback, and the root-counter-2 event handler the sound driver installs (SuzukiSPUInitialiser: OpenEvent(0xf2000002, ..., handler), SetRCnt(..., 0x44e8):
+ * 17640 counter ticks = 240 Hz) four times -- the driver's music sequencer and sound effects only advance when it is called. Both machines of the lockstep do the same. */
+static void fire_vblank(hle_t* h) {
+    h->in_cb++;                                                                 /* SDK calls made by the callbacks are traced even while a re-executed VSync(n) of the interpreter is not */
+    if (h->cb_vsync) h->p.call(h->p.ctx, h->cb_vsync, 0, 0);
+    if (h->rcnt2_handler && h->ev[h->rcnt2_slot].used && h->ev[h->rcnt2_slot].enabled) { int k; for (k = 0; k < 4; k++) h->p.call(h->p.ctx, h->rcnt2_handler, 0, 0); }
+    h->in_cb--;
+}
+
 void hle_tick(hle_t* h) {
     h->tick_count++;
     if ((h->tick_count & 3u) == 0) {
         h->frame_counter++;
         h->hblank_quarters = 0;
-        if (h->cb_vsync) h->p.call(h->p.ctx, h->cb_vsync, 0, 0);
+        fire_vblank(h);
     }
 }
 
@@ -138,7 +148,8 @@ unsigned hle_call(hle_t* h, const char* n, unsigned nargs, unsigned a0, unsigned
     if (nargs < 3) a2 = 0;
     if (nargs < 2) a1 = 0;
     if (nargs < 1) a0 = 0;
-    if (!(h->p.interp_reexec && h->vsync_left)) { h->calls++; trace_call(h, n, a0, a1, a2, a3); }      /* a re-executed VSync is one call */
+    if (!(h->p.interp_reexec && h->vsync_left && !h->in_cb)) { h->calls++; trace_call(h, n, a0, a1, a2, a3); }      /* a re-executed VSync is one call */
+    if (h->spu) { unsigned r; if (spu_hle_call(h, h->spu, n, a0, a1, a2, a3, &r)) return r; }          /* the software SPU, when one is attached (SpuWrite is only observed: the generic code runs its callback) */
     if (h->gpu) { unsigned r; if (gpu_hle_call(h, n, a0, a1, a2, a3, &r)) return r; }          /* the software GPU, when one is attached */
     if (streq(n, "VSync")) {
         /* VSync(0): wait for the next vertical blank; VSync(n >= 2): wait until n blanks have passed since the previous call (the machine does no work
@@ -154,7 +165,7 @@ unsigned hle_call(hle_t* h, const char* n, unsigned nargs, unsigned a0, unsigned
             if (frames) {
                 h->frame_counter++;
                 h->hblank_quarters = 0;
-                if (h->cb_vsync) h->p.call(h->p.ctx, h->cb_vsync, 0, 0);
+                fire_vblank(h);
                 h->sync_reason = HLE_SYNC_VSYNC;
                 h->vsync_left = frames - 1;
                 h->reexec = h->vsync_left != 0;
@@ -165,7 +176,7 @@ unsigned hle_call(hle_t* h, const char* n, unsigned nargs, unsigned a0, unsigned
         for (k = 0; k < frames; k++) {
             h->frame_counter++;
             h->hblank_quarters = 0;
-            if (h->cb_vsync) h->p.call(h->p.ctx, h->cb_vsync, 0, 0);
+            fire_vblank(h);
             h->sync_reason = HLE_SYNC_VSYNC;
             if (h->p.frame) h->p.frame(h->p.ctx);
         }
@@ -237,7 +248,7 @@ unsigned hle_call(hle_t* h, const char* n, unsigned nargs, unsigned a0, unsigned
     /* BIOS event system. Event handles are 0xf1000000 | (slot + 1). */
     if (streq(n, "OpenEvent")) {
         unsigned i;
-        for (i = 0; i < HLE_EVENTS; i++) if (!h->ev[i].used) { h->ev[i].used = 1; h->ev[i].desc = a0; h->ev[i].spec = a1; h->ev[i].enabled = 0; h->ev[i].ready = 0; return 0xf1000000u | (i + 1); }
+        for (i = 0; i < HLE_EVENTS; i++) if (!h->ev[i].used) { h->ev[i].used = 1; h->ev[i].desc = a0; h->ev[i].spec = a1; h->ev[i].enabled = 0; h->ev[i].ready = 0; if (a0 == 0xf2000002u) { h->rcnt2_handler = a3; h->rcnt2_slot = i; } return 0xf1000000u | (i + 1); }
         return 0xffffffffu;
     }
     if (streq(n, "EnableEvent") || streq(n, "DisableEvent") || streq(n, "CloseEvent") || streq(n, "TestEvent") || streq(n, "WaitEvent")) {
