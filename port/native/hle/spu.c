@@ -98,33 +98,50 @@ int spu_hle_call(hle_t* h, spu_t* s, const char* n, unsigned a0, unsigned a1, un
 
 /* ------------------------------------------------------------------------------------------------------ synthesis */
 static const int f0[5] = { 0, 60, 115, 98, 122 }, f1[5] = { 0, 0, -52, -55, -60 };
-static void decode_block(spu_t* s, spu_voice_t* v) {                           /* the 16-byte ADPCM block at v->addr -> 28 samples */
+static int decode_into(spu_t* s, spu_voice_t* v, unsigned addr, short* out, int* flags_out) {      /* the 16-byte ADPCM block at `addr` -> 28 samples; the ADPCM history runs on from block to block */
     const unsigned char* b;
     int shift, filter, i;
     unsigned flags;
-    if (v->addr + 16 > SPU_RAM_BYTES) { v->on = 0; return; }
-    b = s->ram + v->addr;
+    if (addr + 16 > SPU_RAM_BYTES) return 0;
+    b = s->ram + addr;
     shift = b[0] & 15; filter = (b[0] >> 4) & 7; flags = b[1];
     if (shift > 12) shift = 9;                                                  /* the hardware treats 13..15 like 9 */
     if (filter > 4) filter = 4;
-    if (flags & 4) v->loop_addr = v->addr;
+    if (flags & 4) v->loop_addr = addr;
     for (i = 0; i < 28; i++) {
         int nib = (b[2 + i / 2] >> ((i & 1) * 4)) & 15, smp;
         smp = (short)(nib << 12) >> shift;
         smp += (v->hist1 * f0[filter] + v->hist2 * f1[filter] + 32) >> 6;
         if (smp > 32767) smp = 32767; else if (smp < -32768) smp = -32768;
         v->hist2 = v->hist1; v->hist1 = smp;
-        v->buf[i] = (short)smp;
+        out[i] = (short)smp;
     }
-    v->blocks = (int)flags;                                                     /* kept until the block has been played: bit 0 = end, bit 1 = repeat */
+    *flags_out = (int)flags;
+    return 1;
+}
+static void prefetch_next(spu_t* s, spu_voice_t* v) {                           /* decode the block that follows the current one (what the interpolation needs past the end) */
+    unsigned naddr;
+    v->nvalid = 0;
+    if (v->blocks & 1) {
+        if (!(v->blocks & 2)) return;                                           /* end without repeat: nothing follows */
+        naddr = v->loop_addr;
+    } else naddr = v->addr + 16;
+    if (decode_into(s, v, naddr, v->nbuf, &v->nflags)) { v->naddr = naddr; v->nvalid = 1; }
+}
+static void decode_block(spu_t* s, spu_voice_t* v) {                           /* a freshly keyed voice: its first block and the one after it */
+    int flags, i;
+    for (i = 0; i < 3; i++) v->buf[i] = 0;
+    if (!decode_into(s, v, v->addr, v->buf + 3, &flags)) { v->on = 0; return; }
+    v->blocks = flags;
+    prefetch_next(s, v);
 }
 static void next_block(spu_t* s, spu_voice_t* v) {
-    int flags = v->blocks;
-    if (flags >= 0 && (flags & 1)) {
-        if (!(flags & 2)) { v->on = 0; v->level = 0; return; }                  /* end without repeat: silence */
-        v->addr = v->loop_addr;
-    } else v->addr += 16;
-    decode_block(s, v);
+    int i;
+    if (!v->nvalid) { v->on = 0; v->level = 0; return; }                        /* end without repeat: silence */
+    for (i = 0; i < 3; i++) v->buf[i] = v->buf[28 + i];
+    for (i = 0; i < 28; i++) v->buf[3 + i] = v->nbuf[i];
+    v->addr = v->naddr; v->blocks = v->nflags;
+    prefetch_next(s, v);
 }
 static int rate(int shift, int* step) {                                         /* ADSR: cycles per step for a shift, step scaled in place */
     int c = shift > 11 ? 1 << (shift - 11) : 1;
@@ -232,13 +249,19 @@ void spu_mix(spu_t* s, short* out, int n) {
         int l = 0, r = 0, rl = 0, rr = 0;
         for (k = 0; k < SPU_VOICES; k++) {
             spu_voice_t* v = &s->v[k];
-            int idx, frac, a, b, smp, vl, vr;
+            int idx, frac, smp, vl, vr;
             if (!v->on) continue;
             if (v->blocks == -1) decode_block(s, v);
             if (!v->on) continue;
             idx = (int)(v->pos >> 12); frac = (int)(v->pos & 0xfff);
-            a = v->buf[idx]; b = idx < 27 ? v->buf[idx + 1] : a;
-            smp = a + (((b - a) * frac) >> 12);
+            {   /* 4-point cubic (Catmull-Rom) through the samples idx-1 .. idx+2, which may lie in the previous / next block: no steps at block boundaries */
+                int p0 = v->buf[idx + 2], p1 = v->buf[idx + 3], p2, p3;
+                float x = (float)frac * (1.0f / 4096.0f), r;
+                p2 = idx + 1 < 28 ? v->buf[idx + 4] : (v->nvalid ? v->nbuf[idx + 1 - 28] : p1);
+                p3 = idx + 2 < 28 ? v->buf[idx + 5] : (v->nvalid ? v->nbuf[idx + 2 - 28] : p2);
+                r = (float)p1 + 0.5f * x * ((float)(p2 - p0) + x * ((float)(2 * p0 - 5 * p1 + 4 * p2 - p3) + x * (float)(3 * (p1 - p2) + p3 - p0)));
+                smp = r > 32767.0f ? 32767 : (r < -32768.0f ? -32768 : (int)r);
+            }
             env_tick(v);
             smp = (smp * v->level) >> 15;
             vl = (smp * gain(v->vol_l)) >> 14; vr = (smp * gain(v->vol_r)) >> 14;

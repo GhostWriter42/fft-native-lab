@@ -39,6 +39,10 @@ KEYS = {glfw.KEY_UP: 0x1000, glfw.KEY_RIGHT: 0x2000, glfw.KEY_DOWN: 0x4000, glfw
         glfw.KEY_Z: 0x40, glfw.KEY_X: 0x20, glfw.KEY_A: 0x80, glfw.KEY_S: 0x10, glfw.KEY_Q: 0x04, glfw.KEY_W: 0x08, glfw.KEY_E: 0x01, glfw.KEY_R: 0x02, glfw.KEY_SPACE: 0x800}
 
 
+def fast_hold(win):
+    return glfw.get_key(win, glfw.KEY_TAB) == glfw.PRESS
+
+
 def read_exact(f, n):
     chunks = []
     while n:
@@ -50,7 +54,16 @@ def read_exact(f, n):
     return b''.join(chunks)
 
 
-def test_pad(n):                                            # the START / CIRCLE presses from the title menu into the first battle (padgen.ps1)
+SCRIPT = []
+
+
+def test_pad(n):
+    if SCRIPT:
+        m = 0
+        for f, v in SCRIPT:
+            if f <= n:
+                m = v
+        return m                                            # the START / CIRCLE presses from the title menu into the first battle (padgen.ps1)
     if 600 <= n < 1180 and (n - 600) % 40 < 6:
         return 0x800 if ((n - 600) // 40) % 2 == 0 else 0x20
     return 0
@@ -63,9 +76,18 @@ def main():
     ap.add_argument('--mute', action='store_true')
     ap.add_argument('--fullscreen', action='store_true')
     ap.add_argument('--smooth', action='store_true', help='bilinear filtering when the picture is scaled to the window')
+    ap.add_argument('--script', default='', help='with --test-frames: controller script `frame:mask,frame:mask,...` (a mask holds until the next entry; e.g. 1100:0x800,1106:0) played INSTEAD of the title-to-battle presses')
+    ap.add_argument('--shot-at', default='', help='with --test-frames: frame numbers (comma separated) whose picture is written to port/build/shots/playgl-test-<frame>.png')
+    ap.add_argument('--pace', action='store_true', help='limit to 60 frames per second by the clock (for the headless test, where there is no vsync; with sound the audio queue already paces)')
+    ap.add_argument('--test-audio', action='store_true', help='with --test-frames: play the sound too (default: muted in the headless test)')
     ap.add_argument('--test-frames', type=int, default=0, help='headless self-test: hidden window, the title-to-battle script, exit after N frames and print a summary')
     args = ap.parse_args()
     S = max(1, min(4, args.scale))
+    for item in args.script.split(','):
+        if item.strip():
+            f_, _, m_ = item.partition(':')
+            SCRIPT.append((int(f_), int(m_, 0)))
+    shot_at = {int(v) for v in args.shot_at.split(',') if v.strip()}
 
     name = f'fft-playgl-{os.getpid()}'
     if args.cfg:
@@ -84,7 +106,7 @@ def main():
     log_path.parent.mkdir(parents=True, exist_ok=True)
 
     audio = None
-    if not (args.mute or args.test_frames):
+    if not args.mute and (args.test_audio or not args.test_frames):
         from audio_out import AudioOut
         audio = AudioOut()
         if not audio.ok:
@@ -173,6 +195,7 @@ def main():
 
     t0 = time.time()
     tf = t0
+    next_t = [t0]
     nframes = 0
     render_s = 0.0
     try:
@@ -183,7 +206,13 @@ def main():
                 continue
             hdr = read_exact(proc.stdout, 10)
             if hdr is None or hdr[:2] != b'GL':
-                print('the game stopped:', err['last'] or 'see port/build/native/ls/play_gl.log')
+                print('the game stopped:', err['last'] or 'no error line')
+                try:
+                    print('--- last lines of the game log (port/build/native/ls/play_gl.log):')
+                    for line_ in log_path.read_text(encoding='utf-8', errors='replace').splitlines()[-8:]:
+                        print(line_)
+                except OSError:
+                    pass
                 break
             frame, ab, tb = struct.unpack('<HHI', hdr[2:10])
             trace = read_exact(proc.stdout, tb)
@@ -191,7 +220,11 @@ def main():
             if trace is None or (ab and snd is None):
                 break
             if snd and audio:
+                audio.wait_room(5)                                    # the audio clock paces the game: no chunk is ever dropped
                 audio.write(snd)
+            elif args.pace and not fast_hold(win):
+                time.sleep(max(0.0, next_t[0] - time.time()))
+                next_t[0] = max(next_t[0] + 1 / 60.0, time.time() - 0.1)
             g0 = time.time()
             rend.run(trace)
             fast = glfw.get_key(win, glfw.KEY_TAB) == glfw.PRESS and not args.test_frames
@@ -206,6 +239,8 @@ def main():
             render_s += time.time() - g0
             state['n'] = frame
             nframes += 1
+            if frame in shot_at:
+                Image.fromarray(rend.read_display_rgb()).save(shots / f'playgl-test-{frame}.png')
             pad = pad_mask()
             proc.stdin.write(struct.pack('<HB', pad, state['cmd']))
             proc.stdin.flush()
@@ -218,8 +253,16 @@ def main():
                 dt = time.time() - t0
                 print(f'test: {nframes} frames in {dt:.1f} s ({nframes / dt:.1f} fps), game frame {frame}, GPU replay {1000 * render_s / nframes:.2f} ms/frame')
                 break
+    except Exception:                                         # never close silently: say why (and keep it in the log)
+        import traceback
+        tb = traceback.format_exc()
+        print('the viewer failed:')
+        print(tb)
+        with open(log_path, 'a', encoding='utf-8') as lf:
+            lf.write('viewer exception:\n' + tb)
     finally:
         if audio:
+            print(audio.stats())
             audio.close()
         try:
             proc.stdin.close()

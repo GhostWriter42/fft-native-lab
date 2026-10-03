@@ -76,6 +76,7 @@ def main():
     ap.add_argument('--vram-check', action='store_true', help='also receive the whole VRAM of the software model each frame (gltrace 3) and report where the 1x VRAM mirror of the renderer differs outside the framebuffer areas')
     ap.add_argument('--fb-check', action='store_true', help='with --vram-check: report the first frame at which the GPU framebuffer (whole 1x VRAM area) differs from the software VRAM')
     ap.add_argument('--fb-min', type=int, default=0, help='with --fb-check: only report a frame with more than this many differing pixels')
+    ap.add_argument('--scale', type=int, default=1, help='render at this internal resolution and compare the picture averaged down to 1x (flat areas must match; polygon edges differ a little)')
     ap.add_argument('--cfg-extra', default='', help='more run.cfg lines separated by ;')
     args = ap.parse_args()
 
@@ -107,7 +108,7 @@ def main():
     win = glfw.create_window(64, 64, 'gl_verify', None, None)
     glfw.make_context_current(win)
     ctx = moderngl.create_context()
-    r = GLRenderer(ctx, 1)
+    r = GLRenderer(ctx, args.scale)
     print('GPU:', ctx.info['GL_RENDERER'])
 
     pad_fn = make_pad(args.pad_seed)
@@ -148,6 +149,10 @@ def main():
         g0 = time.time()
         r.run(trace)
         gl = r.read_display_rgb()
+        if args.scale > 1:
+            S_ = args.scale
+            gh, gw = gl.shape[0] // S_, gl.shape[1] // S_
+            gl = np.rint(gl.reshape(gh, S_, gw, S_, 3).mean(axis=(1, 3))).astype(np.uint8)
         gl_time += time.time() - g0
         if gl.shape == sw.shape:
             d = np.abs(gl.astype(np.int16) - sw.astype(np.int16))

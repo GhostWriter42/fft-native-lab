@@ -18,8 +18,11 @@ typedef struct spu_voice {
     unsigned loop_addr;                                                         /* byte address the next loop jumps to */
     unsigned pos;                                                               /* 12-bit fractional sample position inside the 28 decoded samples */
     int hist1, hist2;                                                           /* ADPCM history */
-    short buf[28 + 3];                                                          /* decoded samples (3 carried over from the previous block for interpolation) */
-    int blocks;
+    short buf[28 + 3];                                                          /* buf[0..2] = the last 3 samples of the previous block, buf[3..30] = the 28 decoded samples of the current one */
+    int blocks;                                                                 /* flags of the current block (bit 0 end, bit 1 repeat, bit 2 loop start); -1 = nothing decoded yet */
+    short nbuf[28];                                                             /* the NEXT block, decoded ahead so that the interpolation can look past the end of the current one */
+    int nflags, nvalid;
+    unsigned naddr;
 } spu_voice_t;
 
 typedef struct spu {

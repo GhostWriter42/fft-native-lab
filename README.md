@@ -11,7 +11,7 @@ The goal is an HD build and, later, multiplayer. Work in progress; nothing here 
 | Proof of correctness | A MIPS R3000 interpreter runs the **original machine code** from your disc next to the native build; RAM, scratchpad, every SDK call and VRAM are compared at every frame. Hundreds of random-play runs of 12,000-60,000 frames are identical (latest: 32 random-battle seeds x 30,000 frames on the current upstream base). |
 | Playable window | `play.ps1` (Python/Tk) and, new, `play.ps1 -Gl`: **the graphics card draws** (OpenGL), at 1x-4x the original resolution, keyboard + sound + save states + fast-forward. |
 | GPU renderer | The game's GPU command trace is replayed on the GPU; checked pixel by pixel against the software GPU on ~54,000 frames (title, dialogue, battle map, world map): 100% of frames within tolerance, 0.5-2 ms per frame. See `NATIVE-RUNTIME.md` "Result 9". |
-| Sound | The game's sound driver runs; a software SPU (ADPCM, ADSR, reverb) plays through Windows audio. Not yet listened to by anyone: expect rough edges. |
+| Sound | The game's sound driver runs; a software SPU (ADPCM, ADSR, reverb, 4-point cubic resampling across ADPCM blocks) plays through Windows audio, paced by the audio clock (no dropped chunks). Heard by the owner on 2026-10-03: "sounds normal" after the resampling and buffering fixes. Noise generator, pitch modulation and XA streams are not modelled. |
 | Two players | Deterministic lockstep over TCP (only controllers are sent), late join, hot-seat and AI-ally control. Tested headless; not yet with the GPU viewer. |
 | HD | 2x-4x rendering on the GPU; texture filtering and replacement art are the next steps. |
 

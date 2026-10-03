@@ -37,6 +37,7 @@ FS = """
 #version 330
 uniform usampler2D vram;
 uniform int u_pass;        // 0: every pixel; 1: the pixels that are NOT blended; 2: the blended ones (semi-transparent primitive, texel STP bit set or untextured)
+uniform int u_s;           // internal resolution factor
 uniform int u_abr;         // semi-transparency mode of the draw (0..3); the blend factors of each pixel go to the second output (dual-source blending)
 in vec3 v_col; in vec2 v_uv;
 flat in uint v_flags; flat in uint v_clut; flat in uint v_tpage; flat in uvec4 v_twin;
@@ -45,11 +46,16 @@ layout(location = 0, index = 1) out vec4 f_blend;   // .rgb = source factor, .a 
 uint tex16(int x, int y) { return texelFetch(vram, ivec2(x & 1023, y & 511), 0).r; }
 void main() {
     bool textured = (v_flags & 1u) != 0u, raw = (v_flags & 2u) != 0u, semi = (v_flags & 4u) != 0u;
+    // The software model picks the texel at the integer sample point (x, y) of every VRAM pixel. At u_s > 1 every VRAM pixel is u_s x u_s fragments: evaluate the texture
+    // coordinates for all of them at that same point (u is planar inside a triangle, so the screen-space derivatives are exact); equal to the plain value at u_s = 1.
+    vec2 xc = gl_FragCoord.xy / float(u_s);
+    vec2 dl = floor(xc) - xc + 0.5;
+    vec2 uvp = v_uv + (dFdx(v_uv) * dl.x + dFdy(v_uv) * dl.y) * float(u_s);
     ivec3 c = ivec3(floor(v_col + 0.001));
     ivec3 c5;
     bool blended = semi;
     if (textured) {
-        int u = int(floor(v_uv.x + 0.001)) & 255, v = int(floor(v_uv.y + 0.001)) & 255;
+        int u = int(floor(uvp.x + 0.001)) & 255, v = int(floor(uvp.y + 0.001)) & 255;
         int mx = int(v_twin.x), my = int(v_twin.y), ox = int(v_twin.z), oy = int(v_twin.w);
         u = (u & ~(mx * 8)) | ((ox & mx) * 8);
         v = (v & ~(my * 8)) | ((oy & my) * 8);
@@ -141,6 +147,7 @@ class GLRenderer:
         self.prog['vram'] = 0
         self.prog['u_pass'] = 0
         self.prog['u_abr'] = 0
+        self.prog['u_s'] = S
         self.vao = ctx.vertex_array(self.prog, [(self.vbo, '2i4 2i2 4u1 2u2 4u1', 'in_pos', 'in_uv', 'in_rgbf', 'in_ct', 'in_twin')])
         self.blit = ctx.program(vertex_shader=FULL_VS, fragment_shader=BLIT_FS)
         self.blit['vram'] = 0

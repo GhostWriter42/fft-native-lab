@@ -30,6 +30,8 @@ class AudioOut:
         self.ok = False
         self.dropped = 0
         self.written = 0
+        self.underruns = 0                                       # a chunk arrived when nothing was left to play: an audible gap
+        self.started = False
         if sys.platform != 'win32':
             return
         try:
@@ -47,9 +49,28 @@ class AudioOut:
         except (OSError, AttributeError):
             self.ok = False
 
+    def queued(self):
+        """How many chunks are waiting to be played (written and not yet finished)."""
+        return sum(1 for h in self.hdrs if (h.dwFlags & WHDR_PREPARED) and not (h.dwFlags & WHDR_DONE))
+
+    def wait_room(self, max_queued=5, timeout=0.05):
+        """Block until at most max_queued chunks are waiting: the game then runs exactly at the audio clock (no dropped chunks, ~max_queued/60 s of latency)."""
+        if not self.ok:
+            return
+        import time
+        t0 = time.time()
+        while self.queued() > max_queued and time.time() - t0 < timeout:
+            time.sleep(0.001)
+
+    def stats(self):
+        return f'audio: {self.written} chunks played, {self.dropped} dropped, {self.underruns} underruns (gaps)'
+
     def write(self, data):
         if not self.ok or not data:
             return
+        if self.started and self.queued() == 0:
+            self.underruns += 1
+        self.started = self.written >= 3
         for i, h in enumerate(self.hdrs):
             if h.dwFlags == 0 or (h.dwFlags & WHDR_DONE):
                 if h.dwFlags & WHDR_PREPARED:
