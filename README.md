@@ -9,7 +9,7 @@ The goal is an HD build and, later, multiplayer. Work in progress; nothing here 
 |---|---|
 | Native build | The decomp's C compiles with a modern compiler and runs the whole game from the title screen through the first battle, the world map and the menus, on a small platform layer (software GPU, software sound chip, CD reader). |
 | Proof of correctness | A MIPS R3000 interpreter runs the **original machine code** from your disc next to the native build; RAM, scratchpad, every SDK call and VRAM are compared at every frame. Hundreds of random-play runs of 12,000-60,000 frames are identical (latest: 32 random-battle seeds x 30,000 frames on the current upstream base). |
-| Playable window | `play.ps1` (Python/Tk) and, new, `play.ps1 -Gl`: **the graphics card draws** (OpenGL), at 1x-4x the original resolution, keyboard + sound + save states + fast-forward. |
+| Playable window | `play.ps1` (Python/Tk, slow: the CPU draws) and `play.ps1 -Gl`: **the graphics card draws** (OpenGL), at 1x-4x the original resolution, keyboard + sound + save states + fast-forward. Title screen, New Game (name and birthday entry), the opening scene and the first battle are playable; diagnostics: `-Record` (frame ring buffer, flashing detector), `-Compare` (live GPU vs software picture), controller input of every session is logged and replayable. |
 | GPU renderer | The game's GPU command trace is replayed on the GPU; checked pixel by pixel against the software GPU on ~54,000 frames (title, dialogue, battle map, world map): 100% of frames within tolerance, 0.5-2 ms per frame. See `NATIVE-RUNTIME.md` "Result 9". |
 | Sound | The game's sound driver runs; a software SPU (ADPCM, ADSR, reverb, 4-point cubic resampling across ADPCM blocks) plays through Windows audio, paced by the audio clock (no dropped chunks). Heard by the owner on 2026-10-03: "sounds normal" after the resampling and buffering fixes. Noise generator, pitch modulation and XA streams are not modelled. |
 | Two players | Deterministic lockstep over TCP (only controllers are sent), late join, hot-seat and AI-ally control. Tested headless; not yet with the GPU viewer. |
@@ -17,11 +17,18 @@ The goal is an HD build and, later, multiplayer. Work in progress; nothing here 
 
 Details and evidence: `NATIVE-RUNTIME.md` (design + results), `OVERNIGHT-REPORT.md` (newest first), `port/README.md` (every script), `HOW-TO-PLAY.md`.
 
+**Known issues / next** (2026-10-03)
+
+* The terrain of the opening scene (the Gafgarion / Agrias dialogue) renders **red**; it is not expected to be. Probably a palette (CLUT) or fade state that the platform layer does not reproduce; an earlier, unexplained green/magenta tint of battle maps is likely the same cause. Next to investigate.
+* **Platform-layer fidelity audit**: the flashing, text-less name-entry screen was caused by two SDK calls that the layer replaces (`PutDrawEnv`, `ResetGraph`) not keeping library state that the game's own code reads later; both are fixed (`NATIVE-RUNTIME.md` "Result 10"). The same class of bug may hide in other replaced calls, and the lockstep tests cannot see it because both machines share the layer: every replaced call will be audited against the real library code.
+* **Scenes**: recording gameplay from save states as named, replayable scenes (state + controller log; the viewer already logs and replays controller input) to regression-test screens the random-play soaks never reach.
+* The viewer has no two-player hooks yet, no texture filtering / widescreen on the GPU path, and sound lacks the noise generator, pitch modulation and CD-XA.
+
 ## How this differs from the repository it was forked from
 
 The decompilation itself is **upstream's**. We do not change what it builds: everything that is not a documentation or build-hygiene change stays in this repository, outside the decomp.
 
-* **The decomp fork** ([GhostWriter42/fft_decomp](https://github.com/GhostWriter42/fft_decomp)) carries only three small branches on top of upstream's master, all byte-exact (`validate` 5,296 of 5,296 functions, `fmt-check` and `check-config` pass):
+* **The decomp fork** ([GhostWriter42/fft_decomp](https://github.com/GhostWriter42/fft_decomp); its default branch `fork` is upstream's master plus an "about this fork" notice, its `master` is a pure mirror) carries only three small branches on top of upstream's master, all byte-exact (`validate` 5,296 of 5,296 functions, `fmt-check` and `check-config` pass):
   * `remove-unneeded-pins-and-barriers` -- 172 compiler-workaround constructs (register pins, empty asm barriers, volatile views and casts, mostly in the reconstructed PS1 SDK) that no longer affect the output;
   * `windows-line-endings` -- `.gitattributes` and a README note so a Windows checkout does not break `check-config`;
   * `document-native-port-ub` -- `QUIRKS.md` only: undefined behaviour that a native build must neutralise (including a null test after a dereference that modern compilers delete).
