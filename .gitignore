@@ -8,3 +8,7 @@
 *.img
 __pycache__/
 *.pyc
+
+# personal agent workspace: progress notes, locks, local instructions (never committed or published)
+/.agents/
+/CLAUDE.local.md
