@@ -37,7 +37,8 @@ $poke = if ($WorldCheat) { 'g_battle_game_state=0x27:g_battle_game_state=0x3b' }
 $cfgDir = Join-Path (Split-Path $PSScriptRoot -Parent) 'build\native\ls'
 New-Item -ItemType Directory -Force $cfgDir | Out-Null
 $cfg = Join-Path $cfgDir 'play.cfg'
-$text = New-RunConfig -Frames 0 -PokeWhen $poke -Gpu -Hd $Hd
+$cfgHd = if ($Gl) { 0 } else { $Hd }                            # with -Gl the graphics card does the HD drawing: the container must NOT also render HD pictures on the CPU
+$text = New-RunConfig -Frames 0 -PokeWhen $poke -Gpu -Hd $cfgHd
 $mode = if ($Verify) { 1 } else { 2 }
 if ($Gl) {                                                     # the graphics card draws: the container sends its GPU command trace, play_gl.py (OpenGL) replays it
     $venvPy = Join-Path (Split-Path $PSScriptRoot -Parent) 'build\venv\Scripts\python.exe'

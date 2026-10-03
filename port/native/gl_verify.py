@@ -78,6 +78,7 @@ def main():
     ap.add_argument('--fb-min', type=int, default=0, help='with --fb-check: only report a frame with more than this many differing pixels')
     ap.add_argument('--scale', type=int, default=1, help='render at this internal resolution and compare the picture averaged down to 1x (flat areas must match; polygon edges differ a little)')
     ap.add_argument('--flicker', action='store_true', help='report windows of frames where the SOFTWARE picture alternates (A B A B ...): flashing that is in the game itself')
+    ap.add_argument('--script', default='', help='controller script frame:mask,frame:mask,... (a mask holds until the next entry) used INSTEAD of the built-in presses')
     ap.add_argument('--cfg-extra', default='', help='more run.cfg lines separated by ;')
     args = ap.parse_args()
 
@@ -113,6 +114,15 @@ def main():
     print('GPU:', ctx.info['GL_RENDERER'])
 
     pad_fn = make_pad(args.pad_seed)
+    if args.script:
+        entries = sorted((int(a_), int(b_, 0)) for a_, _, b_ in (it.partition(':') for it in args.script.split(',') if it.strip()))
+
+        def pad_fn(n, entries=entries):
+            m = 0
+            for f_, v_ in entries:
+                if f_ <= n:
+                    m = v_
+            return m
     dump_frames = {int(v) for v in args.save.split(',') if v.strip()}
     vram_reports = []
     hist_sw = []

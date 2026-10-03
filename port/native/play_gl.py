@@ -77,6 +77,7 @@ def main():
     ap.add_argument('--fullscreen', action='store_true')
     ap.add_argument('--smooth', action='store_true', help='bilinear filtering when the picture is scaled to the window')
     ap.add_argument('--script', default='', help='with --test-frames: controller script `frame:mask,frame:mask,...` (a mask holds until the next entry; e.g. 1100:0x800,1106:0) played INSTEAD of the title-to-battle presses')
+    ap.add_argument('--replay', default='', help='with --test-frames: replay a logged session (the file written to port/build/native/ls/last_input.txt by an earlier run)')
     ap.add_argument('--shot-at', default='', help='with --test-frames: frame numbers (comma separated) whose picture is written to port/build/shots/playgl-test-<frame>.png')
     ap.add_argument('--compare', action='store_true', help='diagnostic: the container also sends the picture of the software renderer for every frame; it is compared with the GPU picture live, frames that differ are saved')
     ap.add_argument('--record', action='store_true', help='diagnostic: keep the last ~4 seconds of frames in memory and write them to port/build/shots/record-<time>/ when flashing is detected, on F10 and on exit')
@@ -89,6 +90,11 @@ def main():
         if item.strip():
             f_, _, m_ = item.partition(':')
             SCRIPT.append((int(f_), int(m_, 0)))
+    if args.replay:
+        for item in Path(args.replay).read_text().split(','):
+            if item.strip():
+                f_, _, m_ = item.partition(':')
+                SCRIPT.append((int(f_) + 1, int(m_, 0)))        # logged at the answer after frame f = the controller of frame f + 1
     shot_at = {int(v) for v in args.shot_at.split(',') if v.strip()}
 
     name = f'fft-playgl-{os.getpid()}'
@@ -242,6 +248,8 @@ def main():
         return n_alt >= 12
 
     nframes_box = [0]
+    input_path = ROOT / 'build' / 'native' / 'ls' / 'last_input.txt'
+    inp = {'last': 0, 'log': open(input_path, 'w', encoding='ascii')}      # frame:mask,frame:mask,...  (the format of --script)
     t0 = time.time()
     tf = t0
     next_t = [t0]
@@ -304,6 +312,10 @@ def main():
             if frame in shot_at:
                 Image.fromarray(rend.read_display_rgb()).save(shots / f'playgl-test-{frame}.png')
             pad = pad_mask()
+            if pad != inp['last']:                                  # every change of the controller is logged: the session can be replayed exactly (--script)
+                inp['last'] = pad
+                inp['log'].write(f'{frame}:0x{pad:x},')
+                inp['log'].flush()
             nframes_box[0] = nframes
             if args.compare or args.record:
                 gl_img = rend.read_display_rgb()
@@ -348,6 +360,8 @@ def main():
         with open(log_path, 'a', encoding='utf-8') as lf:
             lf.write('viewer exception:\n' + tb)
     finally:
+        inp['log'].close()
+        print(f'your controller input of this session is in {input_path} (replay it with --script "$(contents)")')
         if args.record:
             dump_record('on exit')
         if args.compare:
