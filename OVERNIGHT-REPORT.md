@@ -4,6 +4,10 @@ Started 2026-09-29 (evening). Last updated 2026-09-30 (late). Newest status at t
 
 ## Latest: the native game draws real frames, bit-identical with the original code -- and now runs alone, saves its state and is deterministic
 
+**Newest (2026-10-03):** the long soak (32 seeds x 40,000 frames, sound driver running) found 3 divergences, all in the equipment screen: four native-only bugs (a stack buffer overflow
+that corrupted a saved register, three arguments that retail passes through registers). Fixed with exact, reviewed patches on the generated copy only (`NATIVE-RUNTIME.md` "Result 8");
+afterwards **32 of 32 identical**. Also committed: `HOW-TO-PLAY.md` and a double-click launcher `Play FFT.bat`. Nothing pushed or published.
+
 **New (night of 2026-09-30, details in `NATIVE-RUNTIME.md` "Result 5"):**
 
 * **Native-only mode**: no interpreter, no comparison, ~260 frames/s (11,000 frames of title -> first battle in 42 s).

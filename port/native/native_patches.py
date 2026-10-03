@@ -293,7 +293,7 @@ PATCHES = [
     dict(
         file='src/battle/battle_menu_build_unit_portrait_poly.c',
         old='    if (battle_unit_get_stats_from_battle_id(battle_id)->unit_id == g_main_special_portrait_unit_id) {',
-        new='    if ((battle_unit_get_stats_from_battle_id(battle_id) ? battle_unit_get_stats_from_battle_id(battle_id)->unit_id : 0) == g_main_special_portrait_unit_id) {',
+        new='    if (({ battle_stats_t* stats_ = battle_unit_get_stats_from_battle_id(battle_id); stats_ ? stats_->unit_id : 0; }) == g_main_special_portrait_unit_id) {',
         why='battle_unit_get_stats_from_battle_id returns NULL for an id >= 21 (every lockstep seed reaches it: the NULL-page report lists battle_menu_build_unit_portrait_poly+46); retail reads '
             'unit_id (+0x161) from console low RAM, which is zero in the oracle. Explicit zero.',
     ),
@@ -303,5 +303,59 @@ PATCHES = [
         new='        unit->battle_data ? unit->battle_data->equipment[UNIT_EQUIPMENT_SLOT_RIGHT_HAND_WEAPON] : 0, unit);\n    battle_status_init_special_flag_enabling(unit->battle_data ? unit->battle_data->misc_unit_id : 0);',
         why='battle_unit_init_misc_data is called with stats == NULL for some units (it guards stats != 0 at the palette step); the end of the function then reads equipment[] and misc_unit_id '
             'through the NULL battle_data (NULL-page report: battle_unit_init_misc_data+1441). Retail reads zeros from low RAM; explicit zeros.',
+    ),
+    # --- stack buffer overflows that retail's frame layout absorbs
+    dict(
+        file='src/event/equip_menu_load_images_and_reset_lists.c',
+        old='    u16 buf1[4];\n    u16 buf2[12];\n',
+        new='    u16 pal[16];            /* retail: buf1[4] directly followed by buf2[12] in the frame (the 16-halfword store below fills both) */\n'
+            '    u16* buf1 = pal;\n    u16* buf2 = pal + 4;\n',
+        why='lockstep long soak (seeds 1109, 1116, 1121): equip_gfx_store_image_and_wait(&rect, buf1) stores a 16x1 VRAM rectangle (16 halfwords = 32 bytes) into the 4-halfword buf1. '
+            'In retail buf2 sits right above buf1, so the store fills buf1+buf2 exactly (and the following buf2[0] = 0 clears word 4 of the 32 bytes that are then loaded back); a native frame '
+            'puts the saved registers there: the palette data landed in the saved ebx and equip_menu_init_screen stored it as g_equip_unit_status_panel_flags (0x4a303527 instead of the unit id). '
+            'One 32-byte array with buf2 at offset 4 halfwords reproduces the retail layout.',
+    ),
+    dict(
+        file='include/fft/event_equip.h',
+        old='void equip_gfx_build_item_graphic_descriptor(battle_menu_status_panel_graphic_descriptor_t* descriptor);',
+        new='void equip_gfx_build_item_graphic_descriptor(battle_menu_status_panel_graphic_descriptor_t* descriptor, s32 item_id);',
+        why='see equip_gfx_build_item_graphic_descriptor.c (the item id is a register that retail passes through unchanged).',
+    ),
+    dict(
+        file='src/event/equip_gfx_build_item_graphic_descriptor.c',
+        old='void equip_gfx_build_item_graphic_descriptor(battle_menu_status_panel_graphic_descriptor_t* descriptor) {',
+        new='void equip_gfx_build_item_graphic_descriptor(battle_menu_status_panel_graphic_descriptor_t* descriptor, s32 item_id) {',
+        why='lockstep long soak (seeds 1109, 1116): this function calls battle_get_item_graphic_data(&graphic) without loading a1 -- in retail a1 still holds the item id that '
+            'equip_item_build_row_graphic_descriptor passed in it (the decomp documents "the target also passes the row\'s item id in a1"). Natively a1 is lost and the callee got stack garbage '
+            '(0x081d8f71 instead of 0x13), picking a wrong icon (g_equip_cmd_row_sprite_body differed). The item id becomes a real second parameter.',
+    ),
+    dict(
+        file='src/event/equip_gfx_build_item_graphic_descriptor.c',
+        old='    ((void (*)(SPRT*))battle_get_item_graphic_data)(&graphic);',
+        new='    battle_get_item_graphic_data(&graphic, item_id);',
+        why='see above.',
+    ),
+    dict(
+        file='src/event/equip_item_build_row_graphic_descriptor.c',
+        old='    ((void (*)(battle_menu_status_panel_graphic_descriptor_t*, s32))equip_gfx_build_item_graphic_descriptor)(\n        &g_equip_item_graphic_descriptor, ((u8*)g_equip_item_list_entries)[row * 2]);',
+        new='    equip_gfx_build_item_graphic_descriptor(&g_equip_item_graphic_descriptor, ((u8*)g_equip_item_list_entries)[row * 2]);',
+        why='see above: the call now matches the real two-argument prototype.',
+    ),
+    dict(
+        file='src/event/equip_thread_start_if_idle.c',
+        old='    if (((s32 (*)())battle_thread_is_running)() == 0) {',
+        new='    if (battle_thread_is_running(thread_id) == 0) {',
+        why='lockstep long soak (seed 1121, native crash at frame ~24185): the decomp calls battle_thread_is_running with no argument because retail reuses the incoming thread id still in $a0 '
+            '("making the argument explicit changes the target instruction schedule"). A native call passes nothing, so the callee indexed the thread table with a stale stack word '
+            '(0xf83508b4: segmentation fault; with a small stale value the wrong thread slot was tested). The thread id is passed explicitly.',
+    ),
+    dict(
+        file='src/event/equip_entrypoint.c',
+        old='    /* The target loads no argument for this one-argument callee. */\n    ((void (*)(void))main_unit_refresh_stats_and_statuses)();',
+        new='    main_unit_refresh_stats_and_statuses(stats);',
+        why='lockstep long soak (seeds 1109, 1116, 1121: g_battle_unit_misc_data+0x148 native 8 vs 0, NULL-page reads in main_unit_update_stats_statuses_and_equipment): when the equipment '
+            'screen closes, the decomp calls main_unit_refresh_stats_and_statuses with no argument. Retail leaves `stats` in $a0 (disassembly 0x801bf9a8: move a0,v0 ... 0x801bf9f4: jal '
+            'main_unit_refresh_stats_and_statuses with a0 untouched), so it refreshes the edited unit; natively the callee got a stale stack word (NULL or another pointer) and '
+            'refreshed the wrong memory. Passing `stats`.',
     ),
 ]

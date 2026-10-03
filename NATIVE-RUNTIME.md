@@ -332,6 +332,23 @@ veneers (`bcopy` was executing as `bzero`), which had silently made the function
 where retail stores its `$sp` for the soft reset and had no way to restart the game loop (now a builtin `setjmp`/`longjmp` in `replacements\main_asm.c`); an
 undecompiled libgs routine (`world_gs_sortpoly`) was executed as x86 (its MIPS bytes decoded as a call); and the retail-ABI accidents of the table above.
 
+**Result 8 -- the equipment screen (2026-10-03).** A 32-seed random-encounter soak of 40,000 frames each (sound driver running) found 29 identical and three (seeds 1109, 1116, 1121)
+diverging inside the EQUIP overlay (the screen that opens from the battle / world menu). Four native-only bugs, all retail-ABI accidents of the kinds in the table above, all
+fixed by reviewed patches in `native_patches.py` (nothing in `fft_decomp` changed):
+
+1. `equip_menu_load_images_and_reset_lists` stores a 16x1 VRAM rectangle (32 bytes) into `u16 buf1[4]`; retail's frame has `buf2[12]` right above it so the store is absorbed, a native
+   frame has the saved registers there. The VRAM palette data landed in the saved `ebx`, and `equip_menu_init_screen` stored it as the unit id (`g_equip_unit_status_panel_flags`
+   = 0x4a303527). Found by tracking the callee-saved registers at every call entry of the replayed frame (new debugging aid: `lockstep.ps1 -Cflags '-DREGTRACK_LO=a -DREGTRACK_HI=b'`).
+2. `equip_gfx_build_item_graphic_descriptor` calls `battle_get_item_graphic_data(&graphic)` without the item id: retail passes its own `$a1` through. Now a real parameter.
+3. `equip_thread_start_if_idle` tests `battle_thread_is_running()` with no thread id (retail: still in `$a0`); the stale stack word was once 0xf83508b4 (native crash at frame ~24,185).
+4. `equip_entrypoint` closes with `main_unit_refresh_stats_and_statuses()` without its unit (retail: `stats` still in `$a0`, disassembly 0x801bf9a8..0x801bf9f4); the wrong
+   memory was refreshed (`g_battle_unit_misc_data+0x148`, NULL-page reads).
+
+Also changed: the NULL-safe portrait patch uses a statement expression so the call sequence of `battle_unit_get_stats_from_battle_id` stays that of the original (a replay compares
+call sequences). After the fixes: **32 of 32 seeds identical over 40,000 frames** (1,254 s on 16 cores; function coverage union 2,876 of 5,318, event overlays 510 of 777);
+NULL-page accesses left: `bcopy` in `equip_entrypoint` (`g_equip_unit_data[0]` is NULL for a moment in two seeds; reads zero here, a Windows build needs a stand-in).
+Not yet analysed: `world_menu_resize_parent_entry_to_digits` calls `world_text_count_decimal_digits()` without its argument (retail leaves a stale `$a0` from the caller).
+
 ## 10. Open items
 
 * Audio: the SPU (XA streams, ADPCM voices, reverb) is still only logged by the HLE; the movies (MDEC) are skipped.

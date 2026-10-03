@@ -1073,7 +1073,23 @@ static void ls_event_hook(r3k_t* c, unsigned target) {                      /* t
         ev_a0[n_ev_int] = c->r[4]; ev_a1[n_ev_int] = c->r[5]; ev_ra[n_ev_int] = c->r[31]; ev_int[n_ev_int++] = target;
     }
 }
+#ifdef REGTRACK_LO
+static void print_fn_ps1(unsigned a);
+/* debugging aid (-Cflags '-DREGTRACK_LO=a -DREGTRACK_HI=b'): the callee-saved registers as they are at the entry of every traced call with index a..b of the replayed frame:
+ * a value that changes between two consecutive calls of the same caller names the callee that did not preserve it */
+unsigned g_enter_ebx, g_enter_esi, g_enter_edi;
+void ls_enter_real(void* fn, void* site);
+__asm__(".text\n"
+        ".globl __cyg_profile_func_enter\n"
+        "__cyg_profile_func_enter:\n"
+        "    movl %ebx, g_enter_ebx\n"
+        "    movl %esi, g_enter_esi\n"
+        "    movl %edi, g_enter_edi\n"
+        "    jmp ls_enter_real\n");
+void __attribute__((no_instrument_function)) ls_enter_real(void* fn, void* site) {
+#else
 void __attribute__((no_instrument_function)) __cyg_profile_func_enter(void* fn, void* site) {
+#endif
     int k;
     unsigned ps1;
     (void)site;
@@ -1082,6 +1098,9 @@ void __attribute__((no_instrument_function)) __cyg_profile_func_enter(void* fn, 
     k = find_key(nat_key, n_nat, (unsigned)fn);
     if (k < 0) return;                                                      /* a helper that is not a game function */
     ps1 = nat_val[k];
+#ifdef REGTRACK_LO
+    if (g_ev_idx >= REGTRACK_LO && g_ev_idx <= REGTRACK_HI) { out("  REGS #"); outnum(g_ev_idx); out(" "); print_fn_ps1(ps1); out(" ebx="); outhex(g_enter_ebx); out(" esi="); outhex(g_enter_esi); out(" edi="); outhex(g_enter_edi); out("\n"); }
+#endif
     if (g_ev_idx >= n_ev_int || ev_int[g_ev_idx] != ps1) {
         g_div_idx = g_ev_idx; g_div_got = ps1; g_div_want = g_ev_idx < n_ev_int ? ev_int[g_ev_idx] : 0;
         g_hle_native.sync_reason = HLE_SYNC_DIVERGED;
