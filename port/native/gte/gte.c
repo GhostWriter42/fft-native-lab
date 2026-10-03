@@ -257,6 +257,114 @@ static void set_otz(gte_s64 mac0) {
     g_gte.data[GTE_D_OTZ] = v;
 }
 
+/* ------------------------------------------------------------------------------------------ colour / lighting commands
+ * NCS NCT NCCS NCCT NCDS NCDT CC CDP DCPL DPCS DPCT INTPL GPL, written from the public hardware description (psx-spx). The BATTLE overlay's map polygon routines issue NCS / NCT directly (the
+ * ambient / directional light of every map polygon); until these existed the colour FIFO kept stale values and the opening scene's map came out pure red. */
+static void mulmat(int base, const gte_s32 v[3], const gte_s32* t, int sf, int lm) {      /* MAC = (t * 0x1000 + M * v) >> sf, IR = MAC saturated */
+    int i, j;
+    for (i = 0; i < 3; i++) {
+        gte_s64 sum = t ? (gte_s64)t[i] * 0x1000 : 0;
+        for (j = 0; j < 3; j++) sum += (gte_s64)rtm(base, i * 3 + j) * v[j];
+        MAC(i + 1) = (gte_s32)(mac_check(i + 1, sum) >> sf);
+    }
+    for (i = 1; i <= 3; i++) IRN(i) = sat_ir(i, MAC(i), lm);
+}
+static void push_color(void) {                                                             /* colour FIFO <- MAC1..3 / 16 (saturated to 0..255) with the code byte of RGBC */
+    static const gte_u32 rgb_sat[3] = { GTE_F_RGB_R_SAT, GTE_F_RGB_G_SAT, GTE_F_RGB_B_SAT };
+    gte_u32 rgb = (gte_u32)g_gte.data[GTE_D_RGBC] & 0xff000000u;
+    int i;
+    for (i = 1; i <= 3; i++) {
+        gte_s32 c = MAC(i) >> 4;
+        if (c < 0) { set_flag(rgb_sat[i - 1]); c = 0; } else if (c > 0xff) { set_flag(rgb_sat[i - 1]); c = 0xff; }
+        rgb |= (gte_u32)c << (8 * (i - 1));
+    }
+    g_gte.data[GTE_D_RGB0] = g_gte.data[GTE_D_RGB1];
+    g_gte.data[GTE_D_RGB1] = g_gte.data[GTE_D_RGB2];
+    g_gte.data[GTE_D_RGB2] = (gte_s32)rgb;
+}
+static void light_step_a(int vi, int sf, int lm) {                                         /* IR = MAC = (LLM * Vi) >> sf */
+    gte_u32 xy = (gte_u32)g_gte.data[2 * vi], z = (gte_u32)g_gte.data[2 * vi + 1];
+    gte_s32 v[3];
+    v[0] = lo16(xy); v[1] = hi16(xy); v[2] = lo16(z);
+    mulmat(GTE_C_L11L12, v, 0, sf, lm);
+}
+static void light_step_b(int sf, int lm) {                                                 /* IR = MAC = (BK * 0x1000 + LCM * IR) >> sf */
+    gte_s32 v[3], t[3], i;
+    for (i = 0; i < 3; i++) { v[i] = IRN(i + 1); t[i] = g_gte.ctrl[GTE_C_RBK + i]; }
+    mulmat(GTE_C_LR1LR2, v, t, sf, lm);
+}
+static void color_times_ir(gte_s64 in[3]) {                                                /* [R * IR1, G * IR2, B * IR3] << 4 */
+    gte_u32 c = (gte_u32)g_gte.data[GTE_D_RGBC];
+    in[0] = ((gte_s64)(c & 0xff) * IRN(1)) << 4;
+    in[1] = ((gte_s64)((c >> 8) & 0xff) * IRN(2)) << 4;
+    in[2] = ((gte_s64)((c >> 16) & 0xff) * IRN(3)) << 4;
+}
+static void finish_plain(const gte_s64 in[3], int sf, int lm) {                            /* MAC = in >> sf, IR = MAC (no interpolation) */
+    int i;
+    for (i = 0; i < 3; i++) MAC(i + 1) = (gte_s32)(mac_check(i + 1, in[i]) >> sf);
+    for (i = 1; i <= 3; i++) IRN(i) = sat_ir(i, MAC(i), lm);
+}
+static void interpolate(const gte_s64 in[3], int sf, int lm) {                             /* MAC = in + (FC * 0x1000 - in) * IR0, as the hardware does it in two saturating steps */
+    int i;
+    for (i = 0; i < 3; i++) {
+        MAC(i + 1) = (gte_s32)(mac_check(i + 1, ((gte_s64)g_gte.ctrl[GTE_C_RFC + i] << 12) - in[i]) >> sf);
+        IRN(i + 1) = sat_ir(i + 1, MAC(i + 1), 0);
+    }
+    for (i = 0; i < 3; i++) MAC(i + 1) = (gte_s32)(mac_check(i + 1, (gte_s64)IRN(i + 1) * IRN(0) + in[i]) >> sf);
+    for (i = 1; i <= 3; i++) IRN(i) = sat_ir(i, MAC(i), lm);
+}
+static void color_command(int op, int sf, int lm) {
+    gte_s64 in[3];
+    int v, i, n = (op == 0x16 || op == 0x20 || op == 0x3f) ? 3 : 1;
+    switch (op) {
+    case 0x1e: case 0x20:                                                                  /* NCS, NCT: normal colour */
+        for (v = 0; v < n; v++) { light_step_a(v, sf, lm); light_step_b(sf, lm); push_color(); }
+        break;
+    case 0x1b: case 0x3f:                                                                  /* NCCS, NCCT: normal colour colour */
+        n = op == 0x3f ? 3 : 1;
+        for (v = 0; v < n; v++) { light_step_a(v, sf, lm); light_step_b(sf, lm); color_times_ir(in); finish_plain(in, sf, lm); push_color(); }
+        break;
+    case 0x13: case 0x16:                                                                  /* NCDS, NCDT: normal colour depth cue */
+        n = op == 0x16 ? 3 : 1;
+        for (v = 0; v < n; v++) { light_step_a(v, sf, lm); light_step_b(sf, lm); color_times_ir(in); interpolate(in, sf, lm); push_color(); }
+        break;
+    case 0x1c:                                                                             /* CC: colour colour */
+        light_step_b(sf, lm); color_times_ir(in); finish_plain(in, sf, lm); push_color();
+        break;
+    case 0x14:                                                                             /* CDP: colour depth cue */
+        light_step_b(sf, lm); color_times_ir(in); interpolate(in, sf, lm); push_color();
+        break;
+    case 0x29:                                                                             /* DCPL: depth cue (colour * IR) */
+        color_times_ir(in); interpolate(in, sf, lm); push_color();
+        break;
+    case 0x10: {                                                                           /* DPCS: depth cue (RGBC) */
+        gte_u32 c = (gte_u32)g_gte.data[GTE_D_RGBC];
+        in[0] = (gte_s64)(c & 0xff) << 16; in[1] = (gte_s64)((c >> 8) & 0xff) << 16; in[2] = (gte_s64)((c >> 16) & 0xff) << 16;
+        interpolate(in, sf, lm); push_color();
+        break;
+    }
+    case 0x2a:                                                                             /* DPCT: depth cue triple (the oldest FIFO colour, three times) */
+        for (v = 0; v < 3; v++) {
+            gte_u32 c = (gte_u32)g_gte.data[GTE_D_RGB0];
+            in[0] = (gte_s64)(c & 0xff) << 16; in[1] = (gte_s64)((c >> 8) & 0xff) << 16; in[2] = (gte_s64)((c >> 16) & 0xff) << 16;
+            interpolate(in, sf, lm); push_color();
+        }
+        break;
+    case 0x11:                                                                             /* INTPL: interpolate IR with the far colour */
+        for (i = 0; i < 3; i++) in[i] = (gte_s64)IRN(i + 1) << 12;
+        interpolate(in, sf, lm); push_color();
+        break;
+    case 0x3e:                                                                             /* GPL: general purpose interpolation with accumulate */
+        for (i = 0; i < 3; i++) {
+            gte_s64 base = (gte_s64)MAC(i + 1) << sf;
+            MAC(i + 1) = (gte_s32)(mac_check(i + 1, (gte_s64)IRN(0) * IRN(i + 1) + base) >> sf);
+        }
+        for (i = 1; i <= 3; i++) IRN(i) = sat_ir(i, MAC(i), lm);
+        push_color();
+        break;
+    }
+}
+
 void gte_command(gte_u32 cmd) {
     int sf = GTE_CMD_SF(cmd) * 12, lm = GTE_CMD_LM(cmd), i;
     cmd &= 0x1ffffff;
@@ -317,7 +425,10 @@ void gte_command(gte_u32 cmd) {
         for (i = 1; i <= 3; i++) IRN(i) = sat_ir(i, MAC(i), lm);
         break;
     }
+    case 0x10: case 0x11: case 0x13: case 0x14: case 0x16: case 0x1b: case 0x1c: case 0x1e: case 0x20: case 0x29: case 0x2a: case 0x3e: case 0x3f:
+        color_command((int)GTE_CMD_OP(cmd), sf, lm);
+        break;
     default:
-        break;   /* colour/lighting commands are not used by the game's libgte API; unimplemented on purpose */
+        break;   /* other (undefined) command numbers do nothing */
     }
 }

@@ -79,6 +79,7 @@ def main():
     ap.add_argument('--script', default='', help='with --test-frames: controller script `frame:mask,frame:mask,...` (a mask holds until the next entry; e.g. 1100:0x800,1106:0) played INSTEAD of the title-to-battle presses')
     ap.add_argument('--replay', default='', help='with --test-frames: replay a logged session (the file written to port/build/native/ls/last_input.txt by an earlier run)')
     ap.add_argument('--trace-at', default='', help='with --test-frames: frame numbers whose GPU command trace is written to port/build/shots/trace-<frame>.bin')
+    ap.add_argument('--vram-at', default='', help='with --test-frames: frame numbers whose 1x VRAM mirror (1024x512 uint16) is saved to port/build/shots/vram-<frame>.npy')
     ap.add_argument('--shot-at', default='', help='with --test-frames: frame numbers (comma separated) whose picture is written to port/build/shots/playgl-test-<frame>.png')
     ap.add_argument('--compare', action='store_true', help='diagnostic: the container also sends the picture of the software renderer for every frame; it is compared with the GPU picture live, frames that differ are saved')
     ap.add_argument('--record', action='store_true', help='diagnostic: keep the last ~4 seconds of frames in memory and write them to port/build/shots/record-<time>/ when flashing is detected, on F10 and on exit')
@@ -96,6 +97,7 @@ def main():
             if item.strip():
                 f_, _, m_ = item.partition(':')
                 SCRIPT.append((int(f_) + 1, int(m_, 0)))        # logged at the answer after frame f = the controller of frame f + 1
+    vram_at = {int(v) for v in args.vram_at.split(',') if v.strip()}
     trace_at = {int(v) for v in args.trace_at.split(',') if v.strip()}
     shot_at = {int(v) for v in args.shot_at.split(',') if v.strip()}
 
@@ -313,6 +315,9 @@ def main():
             render_s += time.time() - g0
             state['n'] = frame
             nframes += 1
+            if frame in vram_at:
+                import numpy as np_
+                np_.save(shots / f'vram-{frame}.npy', rend.vram)
             if frame in shot_at:
                 Image.fromarray(rend.read_display_rgb()).save(shots / f'playgl-test-{frame}.png')
             pad = pad_mask()

@@ -19,7 +19,7 @@ Details and evidence: `NATIVE-RUNTIME.md` (design + results), `OVERNIGHT-REPORT.
 
 **Known issues / next** (2026-10-03)
 
-* The terrain of the opening scene (the Gafgarion / Agrias dialogue) renders **red**; it is not expected to be. Probably a palette (CLUT) or fade state that the platform layer does not reproduce; an earlier, unexplained green/magenta tint of battle maps is likely the same cause. Next to investigate.
+* **Fixed 2026-10-03:** the opening scene's terrain rendered red because the software GTE did not implement its colour / lighting commands (NCS, NCT, ...); they are implemented and unit-tested now (`NATIVE-RUNTIME.md` "Result 11"). To re-check: the battle maps' old green / magenta tint, and further GTE hardware details (flag bits, the MVMVA far-colour quirk).
 * **Platform-layer fidelity audit**: the flashing, text-less name-entry screen was caused by two SDK calls that the layer replaces (`PutDrawEnv`, `ResetGraph`) not keeping library state that the game's own code reads later; both are fixed (`NATIVE-RUNTIME.md` "Result 10"). The same class of bug may hide in other replaced calls, and the lockstep tests cannot see it because both machines share the layer: every replaced call will be audited against the real library code.
 * **Scenes**: recording gameplay from save states as named, replayable scenes (state + controller log; the viewer already logs and replays controller input) to regression-test screens the random-play soaks never reach.
 * The viewer has no two-player hooks yet, no texture filtering / widescreen on the GPU path, and sound lacks the noise generator, pitch modulation and CD-XA.

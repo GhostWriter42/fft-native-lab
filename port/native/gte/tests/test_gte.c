@@ -161,7 +161,77 @@ static void test_divide(void) {
            total, differ, 100.0 * differ / total, maxerr, maxrel);
 }
 
+/* colour / lighting commands: independent plain-C reference of the documented formulas, random matrices, vectors, colours, shift and clamp bits */
+static void set_m(int base, const int m[3][3]) {
+    gte_ctc2(base, pk(m[0][0], m[0][1])); gte_ctc2(base + 1, pk(m[0][2], m[1][0])); gte_ctc2(base + 2, pk(m[1][1], m[1][2]));
+    gte_ctc2(base + 3, pk(m[2][0], m[2][1])); gte_ctc2(base + 4, (gte_u32)m[2][2]);
+}
+static int clamp255(long long v) { return v < 0 ? 0 : (v > 255 ? 255 : (int)v); }
+static void ref_light(const int L[3][3], const int C[3][3], const int bk[3], const int vtx[3], int sf, int lm, long long mac[3], long long ir[3]) {
+    long long a[3], d = sf ? 4096 : 1, s;
+    int i, j;
+    for (i = 0; i < 3; i++) { s = 0; for (j = 0; j < 3; j++) s += (long long)L[i][j] * vtx[j]; a[i] = sat16(floordiv(s, d), lm); }
+    for (i = 0; i < 3; i++) { s = (long long)bk[i] * 4096; for (j = 0; j < 3; j++) s += (long long)C[i][j] * a[j]; mac[i] = floordiv(s, d); ir[i] = sat16(mac[i], lm); }
+}
+static void test_color_commands(void) {
+    static const int ops[6] = { 0x1e, 0x20, 0x1b, 0x3f, 0x13, 0x16 };      /* NCS NCT NCCS NCCT NCDS NCDT */
+    int trial, i, j, v;
+    srand(777);
+    for (trial = 0; trial < 30000; trial++) {
+        int L[3][3], C[3][3], vt[3][3], bk[3], fc[3], rgb[3], ir0 = rand() % 4097, sf = rand() & 1, lm = rand() & 1, op = ops[trial % 6];
+        int nv = (op == 0x20 || op == 0x3f || op == 0x16) ? 3 : 1, expect[3][3];
+        long long d = sf ? 4096 : 1;
+        gte_u32 cmd;
+        gte_reset();
+        for (i = 0; i < 3; i++) for (j = 0; j < 3; j++) { L[i][j] = (rand() % 8192) - 3000; C[i][j] = (rand() % 8192) - 2000; vt[i][j] = (rand() % 8192) - 4096; }
+        for (i = 0; i < 3; i++) { bk[i] = rand() % 6000; fc[i] = rand() % 8000; rgb[i] = rand() & 255; }
+        set_m(GTE_C_L11L12, (const int(*)[3])L); set_m(GTE_C_LR1LR2, (const int(*)[3])C);
+        gte_ctc2(GTE_C_RBK, (gte_u32)bk[0]); gte_ctc2(GTE_C_GBK, (gte_u32)bk[1]); gte_ctc2(GTE_C_BBK, (gte_u32)bk[2]);
+        gte_ctc2(GTE_C_RFC, (gte_u32)fc[0]); gte_ctc2(GTE_C_GFC, (gte_u32)fc[1]); gte_ctc2(GTE_C_BFC, (gte_u32)fc[2]);
+        for (v = 0; v < 3; v++) set_v(v, vt[v][0], vt[v][1], vt[v][2]);
+        gte_mtc2(GTE_D_RGBC, (gte_u32)(rgb[0] | (rgb[1] << 8) | (rgb[2] << 16) | (0x2c << 24)));
+        gte_mtc2(GTE_D_IR0, (gte_u32)ir0);
+        for (v = 0; v < nv; v++) {
+            long long mac[3], ir[3], in[3], fin[3];
+            ref_light((const int(*)[3])L, (const int(*)[3])C, bk, vt[v], sf, lm, mac, ir);
+            for (i = 0; i < 3; i++) {
+                if (op == 0x1e || op == 0x20) fin[i] = mac[i];
+                else {
+                    in[i] = ((long long)rgb[i] * ir[i]) << 4;
+                    if (op == 0x1b || op == 0x3f) fin[i] = floordiv(in[i], d);
+                    else { long long t = sat16(floordiv(((long long)fc[i] << 12) - in[i], d), 0); fin[i] = floordiv(t * ir0 + in[i], d); }
+                }
+                expect[v][i] = clamp255(floordiv(fin[i], 16));
+            }
+        }
+        cmd = 0x4a400000u | ((gte_u32)sf << 19) | ((gte_u32)lm << 10) | (gte_u32)op;
+        gte_command(cmd);
+        for (v = 0; v < nv; v++) {                                          /* the FIFO holds the colours oldest first: for 3 vertices RGB0 = V0 ... RGB2 = V2; for 1 only RGB2 */
+            gte_u32 w = gte_mfc2(nv == 3 ? GTE_D_RGB0 + v : GTE_D_RGB2);
+            for (i = 0; i < 3; i++)
+                CHECK((int)((w >> (8 * i)) & 255) == expect[v][i], "op %02x trial %d vertex %d channel %d: got %d expected %d (sf %d lm %d)", op, trial, v, i, (int)((w >> (8 * i)) & 255), expect[v][i], sf, lm);
+            CHECK((w >> 24) == 0x2c, "op %02x trial %d: the code byte of RGBC must be kept", op, trial);
+        }
+        if (fails > 20) return;
+    }
+    /* DPCS with IR0 = 0 gives the colour back (sf = 1); INTPL with IR0 = 0 gives IR / 16 */
+    for (trial = 0; trial < 2000; trial++) {
+        int rr = rand() & 255, gg = rand() & 255, bb = rand() & 255, k;
+        gte_reset();
+        gte_mtc2(GTE_D_RGBC, (gte_u32)(rr | (gg << 8) | (bb << 16)));
+        gte_mtc2(GTE_D_IR0, 0);
+        gte_command(0x4a480010u);
+        k = (int)gte_mfc2(GTE_D_RGB2);
+        CHECK((k & 255) == rr && ((k >> 8) & 255) == gg && ((k >> 16) & 255) == bb, "DPCS identity: %06x vs %02x%02x%02x", k & 0xffffff, bb, gg, rr);
+        gte_load_ir(rr * 16, gg * 16, bb * 16);
+        gte_command(0x4a480011u);
+        k = (int)gte_mfc2(GTE_D_RGB2);
+        CHECK((k & 255) == rr && ((k >> 8) & 255) == gg && ((k >> 16) & 255) == bb, "INTPL with IR0 = 0: %06x vs %02x%02x%02x", k & 0xffffff, bb, gg, rr);
+    }
+}
+
 int main(void) {
+    test_color_commands();
     test_identity_and_rotation();
     test_mvmva_random();
     test_rtps();
