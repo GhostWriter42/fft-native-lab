@@ -511,8 +511,8 @@ static unsigned gp0_command(gpu_t* g, const unsigned* w, unsigned n) {
     case 0xc0: return n >= 3 ? 3 : n;
     case 0xe1: set_tpage(g, w[0] & 0x7ffu); return 1;
     case 0xe2: g->twin_mx = (int)(w[0] & 31u); g->twin_my = (int)((w[0] >> 5) & 31u); g->twin_ox = (int)((w[0] >> 10) & 31u); g->twin_oy = (int)((w[0] >> 15) & 31u); return 1;
-    case 0xe3: g->clip_x1 = (int)(w[0] & 0x3ffu); g->clip_y1 = (int)((w[0] >> 10) & 0x1ffu); return 1;
-    case 0xe4: g->clip_x2 = (int)(w[0] & 0x3ffu); g->clip_y2 = (int)((w[0] >> 10) & 0x1ffu); return 1;
+    case 0xe3: if (g_gltrace_on) { unsigned* o6 = glt_new_op(6); if (o6) { o6[1] = 0xe3; o6[2] = w[0]; } } g->clip_x1 = (int)(w[0] & 0x3ffu); g->clip_y1 = (int)((w[0] >> 10) & 0x1ffu); return 1;
+    case 0xe4: if (g_gltrace_on) { unsigned* o6 = glt_new_op(6); if (o6) { o6[1] = 0xe4; o6[2] = w[0]; } } g->clip_x2 = (int)(w[0] & 0x3ffu); g->clip_y2 = (int)((w[0] >> 10) & 0x1ffu); return 1;
     case 0xe5: g->ofs_x = sx11(w[0] & 0x7ffu); g->ofs_y = sx11((w[0] >> 11) & 0x7ffu); return 1;
     case 0xe6: g->mask_set = (int)(w[0] & 1u); g->mask_check = (int)((w[0] >> 1) & 1u); return 1;
     default: g->n_unknown++; return 1;
@@ -567,10 +567,37 @@ static void store_image(hle_t* h, unsigned rect, unsigned data) {
             h->p.write_bytes(h->p.ctx, a, b, 2);
         }
 }
+/* The real PutDrawEnv / PutDispEnv also keep a copy of the environment in libgpu's own memory (g_psyq_gpu_environment.draw / .display); GetDrawEnv / GetDispEnv, which the game
+ * runs natively, copy it back. The name-entry screen uses GetDrawEnv to learn which framebuffer it drew into last and loads its keyboard bitmap into the other one: without the copy
+ * it read a stale environment, the bitmap went to the displayed buffer and the screen flashed with no text. (PS1 addresses of the SCUS image: draw environment 0x800328a4, 92 bytes;
+ * display environment right after it, 20 bytes.) */
+#define PSYQ_DRAW_ENVIRONMENT 0x800328a4u
+#define PSYQ_DISPLAY_ENVIRONMENT 0x80032900u
+/* ResetGraph(0 / 3), which the platform layer takes over, also initialises libgpu's own state (g_psyq_gpu_environment: graph type, queue flag, the VRAM width / height that get_cs / get_ce clamp
+ * every SetDrawArea to, and the stored draw / display environments, which start as -1). Without it the clamps saw a VRAM of size 0 and every draw-area packet of the game's menus became
+ * (1023,1023)-(1023,1023): the text of the name-entry screen was clipped away. A standard console reports graph type 0: 1024 x 512. */
+#define PSYQ_ENVIRONMENT 0x80032894u
+static void reset_graph_state(hle_t* h) {
+    unsigned char buf[128];
+    unsigned k;
+    for (k = 0; k < 128; k++) buf[k] = 0;
+    buf[1] = 1;                                                                 /* queue enabled */
+    buf[4] = 0x00; buf[5] = 0x04;                                               /* vram_width  = 1024 */
+    buf[6] = 0x00; buf[7] = 0x02;                                               /* vram_height = 512 */
+    for (k = 16; k < 128; k++) buf[k] = 0xff;                                   /* draw environment (92 bytes) and display environment (20 bytes): -1 */
+    h->p.write_bytes(h->p.ctx, PSYQ_ENVIRONMENT, buf, 128);
+}
+static void keep_env(hle_t* h, unsigned dst, unsigned src, unsigned n, unsigned defined) {   /* the first `defined` bytes are copied, the rest of the n is stored as zeros */
+    unsigned char buf[96];
+    unsigned k;
+    for (k = 0; k < n; k++) buf[k] = k < defined ? h->p.r8(h->p.ctx, src + k) : 0;
+    h->p.write_bytes(h->p.ctx, dst, buf, n);
+}
 int gpu_hle_call(hle_t* h, const char* n, unsigned a0, unsigned a1, unsigned a2, unsigned a3, unsigned* ret) {
     gpu_t* g = h->gpu;
     (void)a3;
     *ret = 0;
+    if (streq(n, "ResetGraph")) { if ((a0 & 7u) == 0 || (a0 & 7u) == 3) { reset_graph_state(h); *ret = 0; } return 1; }
     if (streq(n, "DrawOTag")) { g_op = "DrawOTag"; g_op_a0 = a0; g_op_a1 = 0; draw_otag(h, a0); return 1; }
     if (streq(n, "DrawPrim")) { unsigned tag = rd32(h, a0); g_op = "DrawPrim"; if (tag >> 24) gp0_packet(h, a0, tag >> 24); return 1; }
     if (streq(n, "LoadImage")) { g->n_loadimage++; g_op = "LoadImage"; g_op_a0 = a0; g_op_a1 = a1; load_image(h, a0, a1); return 1; }
@@ -587,6 +614,7 @@ int gpu_hle_call(hle_t* h, const char* n, unsigned a0, unsigned a1, unsigned a2,
     }
     if (streq(n, "ClearImage")) { g->n_clearimage++; g_op = "ClearImage"; fill_rect(g, (unsigned)(rd16s(h, a0) & 0xffff) | ((unsigned)rd16s(h, a0 + 2) << 16), (unsigned)(rd16s(h, a0 + 4) & 0xffff) | ((unsigned)rd16s(h, a0 + 6) << 16), (a1 & 255u) | ((a2 & 255u) << 8) | ((a3 & 255u) << 16)); return 1; }
     if (streq(n, "PutDispEnv")) {
+        keep_env(h, PSYQ_DISPLAY_ENVIRONMENT, a0, 20, 18);                       /* disp, screen, isinter, isrgb24; pad0 / pad1 are not defined */
         g->disp_x = rd16s(h, a0); g->disp_y = rd16s(h, a0 + 2); g->disp_w = rd16s(h, a0 + 4); g->disp_h = rd16s(h, a0 + 6);
         hd_register(g, g->disp_x, g->disp_y, g->disp_w, g->disp_h);
         { unsigned q = g->n_disp++ & 7u; g->disp_hist[q][0] = g->disp_x; g->disp_hist[q][1] = g->disp_y; g->disp_hist[q][2] = g->disp_w; g->disp_hist[q][3] = g->disp_h; }
@@ -595,6 +623,7 @@ int gpu_hle_call(hle_t* h, const char* n, unsigned a0, unsigned a1, unsigned a2,
         return 1;
     }
     if (streq(n, "PutDrawEnv")) {                                               /* DRAWENV: clip, ofs, tw, tpage, dtd, dfe, isbg, r0 g0 b0 */
+        keep_env(h, PSYQ_DRAW_ENVIRONMENT, a0, 92, 28);                          /* clip .. b0 (28 bytes); the dr_env packet that the real PutDrawEnv builds there is not modelled: the game's own copy of it is uninitialised stack */
         int cx = rd16s(h, a0), cy = rd16s(h, a0 + 2), cw = rd16s(h, a0 + 4), ch = rd16s(h, a0 + 6), twx = rd16s(h, a0 + 12), twy = rd16s(h, a0 + 14), tww = rd16s(h, a0 + 16), twh = rd16s(h, a0 + 18);
         /* libgpu's SetDrawEnv (get_cs / get_ce) CLAMPS the clip corners to the VRAM: the game's deployment screens ask for a clip at x = -128, which becomes 0 -- a wrapped
          * or masked -128 would send every pixel at negative coordinates into the texture pages at the right edge of the VRAM */
