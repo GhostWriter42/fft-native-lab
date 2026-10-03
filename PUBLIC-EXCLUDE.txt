@@ -1,0 +1,15 @@
+# Paths that never leave this machine (read by port/tools/export_public.py, which removes them from every commit of the exported copy).
+# One path per line; a trailing / means a whole directory. See PUBLISHING.md for the reasons.
+
+# pictures of the game (screenshots, decoded sprite sheets, upscaled sprites): Square Enix artwork
+port/samples/
+
+# format-patch exports of the decomp branches: they contain pieces of the decomp's source; the branches themselves belong in a fork of the decomp
+patches/
+
+# mechanical translation of the retail machine code; rebuilt from your own disc by port/native/regen_asm3.py
+port/native/replacements/battle_asm3.c
+
+# output files that list values read from the game's data tables
+port/native/OUTPUT-attack.txt
+port/native/OUTPUT-ram.txt
