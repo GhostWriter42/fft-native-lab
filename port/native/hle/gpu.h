@@ -54,6 +54,11 @@ void gpu_texpage_rgb(const gpu_t* g, int tp_x, int tp_y, int mode, int clut_x, i
 int gpu_display_hd_rgb(const gpu_t* g, unsigned char* out, int* w, int* h);
 /* re-render the HD canvases from the 1x VRAM (nearest upscale): after the machine state was replaced */
 void gpu_hd_resync(gpu_t* g);
+/* command trace for a GPU renderer (see gpu.c): with g_gltrace_on every primitive, VRAM transfer and display setting of a frame is recorded; gltrace_pack serialises it */
+extern int g_gltrace_on;
+void gltrace_begin(void);
+void gltrace_full_vram(const gpu_t* g);
+unsigned gltrace_pack(unsigned char* out, unsigned max);
 unsigned gpu_hash_vram(const gpu_t* g);
 unsigned gpu_hash_display(const gpu_t* g);
 #endif

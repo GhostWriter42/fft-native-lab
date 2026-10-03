@@ -268,10 +268,117 @@ static void hd_tri(gpu_t* g, vtx_t a, vtx_t b, vtx_t c, int textured, int semi, 
         }
 }
 
+/* ------------------------------------------------------------------------------------------ command trace for a GPU renderer */
+/* With g_gltrace_on every primitive the software GPU rasterises is ALSO recorded, already parsed into triangles with absolute VRAM coordinates, together with the VRAM
+ * transfers (uploads with their data, copies, fills) and the display settings, in order. play_frame sends one trace per frame to a viewer that replays it on a real GPU
+ * (play_gl.py): the game's own pixel work stays in this file's software model (the oracle), the viewer only has to draw. Positions are in 1/16 pixel. */
+int g_gltrace_on;
+typedef struct { int x, y; short u, v; unsigned char r, g, b, flags; unsigned short clut, tpage; unsigned char twin[4]; } glvert_t;      /* 24 bytes; flags: 1 textured, 2 raw, 4 semi-transparent */
+#define GLT_MAX_VERTS 100000
+#define GLT_MAX_OPS 6000
+#define GLT_MAX_DATA (2 * 1024 * 1024)
+static glvert_t glt_v[GLT_MAX_VERTS];
+static unsigned glt_op[GLT_MAX_OPS][12];                                        /* 1 DRAW first count blend clip(4) | 2 LOAD x y w h data_offset | 3 MOVE sx sy dx dy w h | 4 FILL x y w h rgb24 | 5 DISP x y w h on rgb24 */
+static unsigned char glt_data[GLT_MAX_DATA];
+static unsigned glt_nv, glt_no, glt_nd, glt_over;
+void gltrace_begin(void) { glt_nv = glt_no = glt_nd = glt_over = 0; }
+static unsigned* glt_new_op(unsigned type) {
+    unsigned* o;
+    int i;
+    if (glt_no >= GLT_MAX_OPS) { glt_over |= 1u; return 0; }
+    o = glt_op[glt_no++];
+    for (i = 0; i < 12; i++) o[i] = 0;
+    o[0] = type;
+    return o;
+}
+static glvert_t* glt_tris(const gpu_t* g, unsigned nverts, unsigned blend) {       /* room for nverts vertices in a DRAW op with this blend code and clip area */
+    unsigned* o = glt_no ? glt_op[glt_no - 1] : 0;
+    if (glt_nv + nverts > GLT_MAX_VERTS) { glt_over |= 2u; return 0; }
+    if (!(o && o[0] == 1 && o[3] == blend && (int)o[4] == g->clip_x1 && (int)o[5] == g->clip_y1 && (int)o[6] == g->clip_x2 && (int)o[7] == g->clip_y2)) {
+        o = glt_new_op(1);
+        if (!o) return 0;
+        o[1] = glt_nv; o[3] = blend; o[4] = (unsigned)g->clip_x1; o[5] = (unsigned)g->clip_y1; o[6] = (unsigned)g->clip_x2; o[7] = (unsigned)g->clip_y2;
+    }
+    o[2] += nverts; glt_nv += nverts;
+    return &glt_v[glt_nv - nverts];
+}
+static unsigned glt_tpage(const gpu_t* g) { return (unsigned)(g->tp_x | (g->tp_y << 4) | (g->abr << 5) | (g->tp << 7)); }
+static void glt_set(glvert_t* q, const gpu_t* g, int x16, int y16, int u, int v, int r, int gg, int b, int flags, int clut_x, int clut_y) {
+    q->x = x16; q->y = y16; q->u = (short)u; q->v = (short)v; q->r = (unsigned char)r; q->g = (unsigned char)gg; q->b = (unsigned char)b; q->flags = (unsigned char)flags;
+    q->clut = (unsigned short)(clut_x | (clut_y << 6)); q->tpage = (unsigned short)glt_tpage(g);
+    q->twin[0] = (unsigned char)g->twin_mx; q->twin[1] = (unsigned char)g->twin_my; q->twin[2] = (unsigned char)g->twin_ox; q->twin[3] = (unsigned char)g->twin_oy;
+}
+static void glt_poly(const gpu_t* g, const vtx_t* v, int quad, int textured, int semi, int raw, int clut_x, int clut_y) {
+    static const int idx[6] = { 0, 1, 2, 1, 2, 3 };
+    int n = quad ? 6 : 3, i, flags = textured | (raw << 1) | (semi << 2);
+    glvert_t* q = glt_tris(g, (unsigned)n, semi ? 1u + (unsigned)g->abr : 0u);
+    if (!q) return;
+    for (i = 0; i < n; i++) { const vtx_t* p = &v[idx[i]]; glt_set(q + i, g, p->x * 16, p->y * 16, p->u, p->v, p->r, p->g, p->b, flags, clut_x, clut_y); }
+}
+static void glt_rect(const gpu_t* g, int x, int y, int w, int h, int textured, int raw, int semi, int cr, int cg, int cb, int u0, int v0, int clut_x, int clut_y) {      /* x, y with the drawing offset */
+    static const int ix[6] = { 0, 1, 0, 1, 0, 1 }, iy[6] = { 0, 0, 1, 0, 1, 1 };
+    int i, flags = textured | (raw << 1) | (semi << 2);
+    glvert_t* q = glt_tris(g, 6, semi ? 1u + (unsigned)g->abr : 0u);
+    if (!q) return;
+    for (i = 0; i < 6; i++) glt_set(q + i, g, (x + ix[i] * w) * 16, (y + iy[i] * h) * 16, u0 + ix[i] * w, v0 + iy[i] * h, cr, cg, cb, flags, clut_x, clut_y);
+}
+static double glt_sqrt(double v) { double r = v > 1.0 ? v / 2.0 : 1.0; int i; if (v <= 0.0) return 0.0; for (i = 0; i < 30; i++) r = 0.5 * (r + v / r); return r; }
+static void glt_line(const gpu_t* g, const vtx_t* a, const vtx_t* b, int semi) {                    /* a one-pixel-wide quad along the line (the viewer adds the half pixel that puts the software model's integer sample points at GL pixel centres) */
+    double dx = (double)(b->x - a->x), dy = (double)(b->y - a->y), len = glt_sqrt(dx * dx + dy * dy), nx, ny;
+    int flags = semi << 2, ax = a->x * 16, ay = a->y * 16, bx = b->x * 16, by = b->y * 16, ox, oy;
+    glvert_t* q;
+    if (len < 0.5) { nx = 0.0; ny = 8.0; dx = 1.0; dy = 0.0; len = 1.0; } else { nx = -dy / len * 8.0; ny = dx / len * 8.0; }
+    ox = (int)(nx); oy = (int)(ny);
+    q = glt_tris(g, 6, semi ? 1u + (unsigned)g->abr : 0u);
+    if (!q) return;
+    glt_set(q + 0, g, ax - ox, ay - oy, 0, 0, a->r, a->g, a->b, flags, 0, 0);
+    glt_set(q + 1, g, ax + ox, ay + oy, 0, 0, a->r, a->g, a->b, flags, 0, 0);
+    glt_set(q + 2, g, bx - ox, by - oy, 0, 0, b->r, b->g, b->b, flags, 0, 0);
+    glt_set(q + 3, g, ax + ox, ay + oy, 0, 0, a->r, a->g, a->b, flags, 0, 0);
+    glt_set(q + 4, g, bx - ox, by - oy, 0, 0, b->r, b->g, b->b, flags, 0, 0);
+    glt_set(q + 5, g, bx + ox, by + oy, 0, 0, b->r, b->g, b->b, flags, 0, 0);
+}
+static void glt_fill(int x, int y, int w, int h, unsigned rgb24) { unsigned* o = glt_new_op(4); if (o) { o[1] = (unsigned)x; o[2] = (unsigned)y; o[3] = (unsigned)w; o[4] = (unsigned)h; o[5] = rgb24; } }
+static void glt_move(int sx, int sy, int dx, int dy, int w, int h) { unsigned* o = glt_new_op(3); if (o) { o[1] = (unsigned)sx; o[2] = (unsigned)sy; o[3] = (unsigned)dx; o[4] = (unsigned)dy; o[5] = (unsigned)w; o[6] = (unsigned)h; } }
+static void glt_disp(const gpu_t* g) { unsigned* o = glt_new_op(5); if (o) { o[1] = (unsigned)g->disp_x; o[2] = (unsigned)g->disp_y; o[3] = (unsigned)g->disp_w; o[4] = (unsigned)g->disp_h; o[5] = (unsigned)g->disp_on; o[6] = (unsigned)g->disp_rgb24; } }
+static unsigned char* glt_load(int x, int y, int w, int h) {                    /* a LOAD op; returns where the w*h 16-bit pixels go (little endian) */
+    unsigned bytes = (unsigned)(w * h * 2), off = glt_nd;
+    unsigned* o;
+    if (w <= 0 || h <= 0) return 0;
+    if (glt_nd + bytes > GLT_MAX_DATA) { glt_over |= 4u; return 0; }
+    o = glt_new_op(2);
+    if (!o) return 0;
+    o[1] = (unsigned)x; o[2] = (unsigned)y; o[3] = (unsigned)w; o[4] = (unsigned)h; o[5] = off;
+    glt_nd += bytes;
+    return glt_data + off;
+}
+/* the whole VRAM as one upload: for the first frame of a viewer, and after a saved state was loaded */
+void gltrace_full_vram(const gpu_t* g) {
+    unsigned char* d = glt_load(0, 0, GPU_VRAM_W, GPU_VRAM_H);
+    int i;
+    if (!d) return;
+    for (i = 0; i < GPU_VRAM_W * GPU_VRAM_H; i++) { d[2 * i] = (unsigned char)(g->vram[i] & 255u); d[2 * i + 1] = (unsigned char)(g->vram[i] >> 8); }
+    glt_disp(g);
+}
+/* the trace as bytes: 'GLT1' nverts nops ndata overflow | vertices (24 bytes each) | ops (48 bytes each) | data; returns the size, 0 when `max` is too small */
+unsigned gltrace_pack(unsigned char* out, unsigned max) {
+    unsigned need = 20u + glt_nv * 24u + glt_no * 48u + glt_nd, i, k = 0;
+    const unsigned char* src;
+    unsigned hdr[5];
+    if (need > max) return 0;
+    hdr[0] = 0x31544c47u; hdr[1] = glt_nv; hdr[2] = glt_no; hdr[3] = glt_nd; hdr[4] = glt_over;
+    src = (const unsigned char*)hdr; for (i = 0; i < 20; i++) out[k++] = src[i];
+    src = (const unsigned char*)glt_v; for (i = 0; i < glt_nv * 24u; i++) out[k++] = src[i];
+    src = (const unsigned char*)glt_op; for (i = 0; i < glt_no * 48u; i++) out[k++] = src[i];
+    for (i = 0; i < glt_nd; i++) out[k++] = glt_data[i];
+    return k;
+}
+
 /* ---------------------------------------------------------------------------------------------- rectangles, lines */
 static void draw_rect(gpu_t* g, int x, int y, int w, int h, int textured, int raw, int semi, int cr, int cg, int cb, int u0, int v0, int clut_x, int clut_y) {
     int xx, yy, hdpass = textured && g->hd_s > 1 && g->hd_filter;
     x += g->ofs_x; y += g->ofs_y;
+    if (g_gltrace_on) glt_rect(g, x, y, w, h, textured, raw, semi, cr, cg, cb, u0, v0, clut_x, clut_y);
     if (hdpass) g->hd_skip = 1;                                                 /* the canvas gets the filtered sprite below, not 1x blocks */
     for (yy = 0; yy < h; yy++) {
         if (y + yy < g->clip_y1 || y + yy > g->clip_y2) continue;
@@ -287,6 +394,7 @@ static int iabs(int v) { return v < 0 ? -v : v; }
 static void draw_line(gpu_t* g, vtx_t a, vtx_t b, int shaded, int semi) {
     int dx = b.x - a.x, dy = b.y - a.y, n = imax(iabs(dx), iabs(dy)), i;
     if (iabs(dx) > 1023 || iabs(dy) > 511) return;
+    if (g_gltrace_on) glt_line(g, &a, &b, semi);
     (void)shaded;
     if (n == 0) { put_pixel(g, a.x, a.y, rgb555((unsigned)a.r, (unsigned)a.g, (unsigned)a.b), semi); return; }
     for (i = 0; i <= n; i++) {
@@ -299,6 +407,7 @@ static void draw_line(gpu_t* g, vtx_t a, vtx_t b, int shaded, int semi) {
 static void fill_rect(gpu_t* g, unsigned xy, unsigned wh, unsigned color24) {                                    /* GP0(02h): ignores the drawing area */
     int x = (int)(xy & 0x3f0u), y = (int)((xy >> 16) & 0x1ffu), w = (int)(((wh & 0x3ffu) + 0xfu) & ~0xfu), h = (int)((wh >> 16) & 0x1ffu), xx, yy;
     unsigned col = rgb555(color24 & 255u, (color24 >> 8) & 255u, (color24 >> 16) & 255u);
+    if (g_gltrace_on) glt_fill(x, y, w, h, color24);
     for (yy = 0; yy < h; yy++) for (xx = 0; xx < w; xx++) { g->vram[((y + yy) & 511) * GPU_VRAM_W + ((x + xx) & 1023)] = (unsigned short)col; g->rd[((y + yy) & 511) * GPU_VRAM_W + ((x + xx) & 1023)] = 0; WATCH(g, x + xx, y + yy, col); }
     if (g->hd_s > 1) hd_sync_rect(g, x, y, w, h);
 }
@@ -340,6 +449,7 @@ static unsigned gp0_command(gpu_t* g, const unsigned* w, unsigned n) {
         }
         g->n_prims++; g->n_tris += quad ? 2u : 1u;
         for (i = 0; i < (int)g->n_skip; i++) if (g->skip_cmd[i] == cmd) return used;
+        if (g_gltrace_on) glt_poly(g, v, quad, textured, semi, raw, clut_x, clut_y);
         raster_tri(g, v[0], v[1], v[2], textured, shaded, semi, raw, clut_x, clut_y);
         if (quad) raster_tri(g, v[1], v[2], v[3], textured, shaded, semi, raw, clut_x, clut_y);
         return used;
@@ -387,6 +497,7 @@ static unsigned gp0_command(gpu_t* g, const unsigned* w, unsigned n) {
         if (n >= 4) {
             int sx = (int)(w[1] & 0x3ffu), sy = (int)((w[1] >> 16) & 0x1ffu), dx = (int)(w[2] & 0x3ffu), dy = (int)((w[2] >> 16) & 0x1ffu), ww = (int)(w[3] & 0x3ffu), hh = (int)((w[3] >> 16) & 0x1ffu), xx, yy;
             if (!ww) ww = 1024; if (!hh) hh = 512;
+            if (g_gltrace_on) glt_move(sx, sy, dx, dy, ww, hh);
             for (yy = 0; yy < hh; yy++) for (xx = 0; xx < ww; xx++) {
                 g->vram[((dy + yy) & 511) * GPU_VRAM_W + ((dx + xx) & 1023)] = g->vram[((sy + yy) & 511) * GPU_VRAM_W + ((sx + xx) & 1023)];
                 g->rd[((dy + yy) & 511) * GPU_VRAM_W + ((dx + xx) & 1023)] = g->rd[((sy + yy) & 511) * GPU_VRAM_W + ((sx + xx) & 1023)];      /* data movement: the copy is as "read" as its source */
@@ -432,9 +543,11 @@ static void load_image(hle_t* h, unsigned rect, unsigned data) {
     gpu_t* g = h->gpu;
     int x = rd16s(h, rect), y = rd16s(h, rect + 2), w = rd16s(h, rect + 4), hh = rd16s(h, rect + 6), xx, yy;
     unsigned a = data;
+    unsigned char* tr = g_gltrace_on ? glt_load(x, y, w, hh) : 0;
     for (yy = 0; yy < hh; yy++)
         for (xx = 0; xx < w; xx++, a += 2) {
             unsigned short c = (unsigned short)(h->p.r8(h->p.ctx, a) | (h->p.r8(h->p.ctx, a + 1) << 8));
+            if (tr) { tr[2 * (yy * w + xx)] = (unsigned char)(c & 255u); tr[2 * (yy * w + xx) + 1] = (unsigned char)(c >> 8); }
             g->vram[((y + yy) & 511) * GPU_VRAM_W + ((x + xx) & 1023)] = c;
             g->rd[((y + yy) & 511) * GPU_VRAM_W + ((x + xx) & 1023)] = 0;
             WATCH(g, x + xx, y + yy, c);
@@ -467,6 +580,7 @@ int gpu_hle_call(hle_t* h, const char* n, unsigned a0, unsigned a1, unsigned a2,
         unsigned short tmp[64];
         (void)tmp;
         g_op = "MoveImage"; g->n_moveimage++;
+        if (g_gltrace_on) glt_move(sx, sy, (int)a1, (int)a2, w, hh);
         for (yy = 0; yy < hh; yy++) for (xx = 0; xx < w; xx++) { g->vram[(((int)a2 + yy) & 511) * GPU_VRAM_W + (((int)a1 + xx) & 1023)] = g->vram[((sy + yy) & 511) * GPU_VRAM_W + ((sx + xx) & 1023)]; g->rd[(((int)a2 + yy) & 511) * GPU_VRAM_W + (((int)a1 + xx) & 1023)] = g->rd[((sy + yy) & 511) * GPU_VRAM_W + ((sx + xx) & 1023)]; WATCH(g, (int)a1 + xx, (int)a2 + yy, g->vram[(((int)a2 + yy) & 511) * GPU_VRAM_W + (((int)a1 + xx) & 1023)]); }
         if (g->hd_s > 1) hd_sync_rect(g, (int)a1, (int)a2, w, hh);
         return 1;
@@ -477,6 +591,7 @@ int gpu_hle_call(hle_t* h, const char* n, unsigned a0, unsigned a1, unsigned a2,
         hd_register(g, g->disp_x, g->disp_y, g->disp_w, g->disp_h);
         { unsigned q = g->n_disp++ & 7u; g->disp_hist[q][0] = g->disp_x; g->disp_hist[q][1] = g->disp_y; g->disp_hist[q][2] = g->disp_w; g->disp_hist[q][3] = g->disp_h; }
         g->disp_rgb24 = h->p.r8(h->p.ctx, a0 + 17) & 1;
+        if (g_gltrace_on) glt_disp(g);
         return 1;
     }
     if (streq(n, "PutDrawEnv")) {                                               /* DRAWENV: clip, ofs, tw, tpage, dtd, dfe, isbg, r0 g0 b0 */
@@ -499,7 +614,7 @@ int gpu_hle_call(hle_t* h, const char* n, unsigned a0, unsigned a1, unsigned a2,
         }
         return 1;
     }
-    if (streq(n, "SetDispMask")) { g->disp_on = a0 != 0; return 1; }
+    if (streq(n, "SetDispMask")) { g->disp_on = a0 != 0; if (g_gltrace_on) glt_disp(g); return 1; }
     return 0;
 }
 

@@ -424,6 +424,7 @@ static unsigned g_effectmap, g_effectmap_on;                                    
 static int g_cdtrace;                                                            /* run.cfg "cdtrace 1": log every CdRead / CdRead2 (native machine) with its frame and sector */
 static int g_trace_abil;                                                         /* run.cfg "traceabil 1": log every ability a unit starts to use */
 static unsigned g_caster, g_caster_seed;                                         /* run.cfg "caster MASK SEED": give the units in MASK a magic skillset and 999 MP (AI casters: effect-overlay coverage) */
+static int g_gltrace, g_gl_full = 1;                                              /* run.cfg "gltrace 1": play mode sends the GPU command trace of each frame (play_gl.py draws it on a real GPU) instead of pixels; g_gl_full: the next trace starts from the whole VRAM */
 static int g_noframes;                                                           /* run.cfg "noframes 1": play mode sends the frame header only (headless tests: no pixels) */
 static unsigned g_hotseat;                                                       /* run.cfg "hotseat MASK": every frame of a battle the units in MASK (bit i = unit slot i) are made player-controlled (hot-seat / PvP experiments) */
 /* "pokewhen CADDR CVAL ADDR VAL [REPEAT]": once (every time, with REPEAT = 1), at the start of the first frame in which the (interpreter-side) word at CADDR equals CVAL, VAL is stored into the word at ADDR on BOTH
@@ -533,7 +534,7 @@ static void parse_path(const char** pp, char* dst, int max) {
 }
 /* every run-configuration variable back to its default (a state loaded from a snapshot overwrote them with the values of the run that saved it; the configuration is read again after a load) */
 static void cfg_reset(void) {
-    g_frames = MAX_FRAMES; g_npadrt = 0; g_npadrt2 = 0; g_seats = 1; g_seat2_units = 0x0aaaaau; g_hotseat = 0; g_caster = g_caster_seed = 0; g_trace_abil = 0; g_audio = 0; g_audiodump[0] = 0; g_cdtrace = 0; g_effectmap = g_effectmap_on = 0; g_autobattle = 0; g_noframes = 0; g_npokes = 0;
+    g_frames = MAX_FRAMES; g_npadrt = 0; g_npadrt2 = 0; g_seats = 1; g_seat2_units = 0x0aaaaau; g_hotseat = 0; g_caster = g_caster_seed = 0; g_trace_abil = 0; g_audio = 0; g_audiodump[0] = 0; g_cdtrace = 0; g_effectmap = g_effectmap_on = 0; g_autobattle = 0; g_noframes = 0; g_gltrace = 0; g_gltrace_on = 0; g_npokes = 0;
     g_natwatch = 0; g_natwatch_from = 1;
     g_gpu_on = 0; g_shotscale = 1; g_gpu_watch = 0;
     g_texdump_n = 0; g_nskipcmd = 0; g_play = 0; g_native_only = 0; g_hd_s = 0; g_hd_filter = 1; g_polydump = 0;
@@ -571,6 +572,7 @@ static void load_run_config(void) {
         else if (p[0] == 's' && p[1] == 'h' && p[4] == 'e') { p += 9; g_shot_every = parse_num(&p); g_shot_from = parse_num(&p); if (!g_shot_from) g_shot_from = 1; }   /* shotevery N [FROM] */
         else if (p[0] == 's' && p[1] == 'h' && p[4] == 's') { p += 9; g_shotscale = (int)parse_num(&p); if (g_shotscale < 1) g_shotscale = 1; if (g_shotscale > 3) g_shotscale = 3; }   /* shotscale N */
         else if (p[0] == 'n' && p[1] == 'a') { p += 8; g_natwatch = parse_num(&p); g_natwatch_from = parse_num(&p); if (!g_natwatch_from) g_natwatch_from = 1; }     /* natwatch ADDR [FROM] */
+        else if (p[0] == 'g' && p[1] == 'l' && p[2] == 't') { p += 7; g_gltrace = (int)parse_num(&p); g_gltrace_on = g_gltrace; g_gl_full = 1; }                                    /* gltrace 1 */
         else if (p[0] == 'n' && p[1] == 'o') { p += 8; g_noframes = (int)parse_num(&p); }                                                                                                  /* noframes 1 */
         else if (p[0] == 'a' && p[1] == 'u' && p[2] == 'd' && p[5] == 'd') { p += 9; parse_path(&p, g_audiodump, (int)sizeof g_audiodump); g_audio = 1; }                                       /* audiodump PATH */
         else if (p[0] == 'a' && p[1] == 'u' && p[2] == 'd') { p += 5; g_audio = (int)parse_num(&p); }                                                                                   /* audio N */
@@ -1392,9 +1394,31 @@ static void audio_dump_frame(void) {
  * 0x11..0x18 load it). The viewer paces the game (it answers when it wants the next frame). */
 static void play_frame(int frame) {
     static unsigned char buf[10 + 1280 * 960 * 3 + 735 * 4];
+    static unsigned char glbuf[10 + 5 * 1024 * 1024 + 735 * 4];
     unsigned char ans[5];
     int want = g_seats > 1 ? 5 : 3;
     int w = 0, h = 0, total, off = 0, abytes = 0;
+    if (g_gltrace) {                                                              /* 'G' 'L' frame(u16) audio-bytes(u16) trace-bytes(u32) + the GPU command trace + the frame's audio */
+        unsigned tb;
+        if (g_gl_full) { gltrace_begin(); gltrace_full_vram(&g_gpu_native); g_gl_full = 0; }
+        tb = gltrace_pack(glbuf + 10, 5u * 1024u * 1024u);
+        if (!tb) { gltrace_begin(); gltrace_full_vram(&g_gpu_native); tb = gltrace_pack(glbuf + 10, 5u * 1024u * 1024u); }       /* a trace that does not fit: resynchronise from the whole VRAM */
+        if (g_audio) { abytes = 735 * 4; spu_mix(&g_spu_native, (short*)(glbuf + 10 + tb), 735); }
+        glbuf[0] = 'G'; glbuf[1] = 'L'; glbuf[2] = (unsigned char)frame; glbuf[3] = (unsigned char)(frame >> 8); glbuf[4] = (unsigned char)abytes; glbuf[5] = (unsigned char)(abytes >> 8);
+        glbuf[6] = (unsigned char)tb; glbuf[7] = (unsigned char)(tb >> 8); glbuf[8] = (unsigned char)(tb >> 16); glbuf[9] = (unsigned char)(tb >> 24);
+        total = 10 + (int)tb + abytes;
+        while (off < total) { long n = sys3(4, 1, (long)(glbuf + off), (long)(total - off)); if (n <= 0) sys3(1, 0, 0, 0); off += (int)n; }
+        gltrace_begin();
+        if (g_gltrace >= 2) goto plain_frame;                                      /* verification: the software GPU's picture of the same frame follows (the viewer compares the two) */
+        off = 0;
+        while (off < want) { long n = sys3(3, 0, (long)(ans + off), (long)(want - off)); if (n <= 0) { out("the viewer closed the pipe: stopping\n"); sys3(1, 0, 0, 0); } off += (int)n; }
+        g_play_pad = (unsigned)ans[0] | ((unsigned)ans[1] << 8);
+        if (want == 5) { g_play_pad2 = (unsigned)ans[2] | ((unsigned)ans[3] << 8); g_play_cmd = ans[4]; }
+        else g_play_cmd = ans[2];
+        return;
+    }
+plain_frame:
+    off = 0;
     if (g_noframes) { w = h = 0; }
     else if (!(g_gpu_native.hd_s > 1 && gpu_display_hd_rgb(&g_gpu_native, buf + 10, &w, &h))) gpu_display_rgb(&g_gpu_native, buf + 10, &w, &h);
     if (g_audio) { abytes = 735 * 4; spu_mix(&g_spu_native, (short*)(buf + 10 + w * h * 3), 735); }       /* one 60 Hz frame of 44.1 kHz stereo, 16 bit */
@@ -1402,6 +1426,12 @@ static void play_frame(int frame) {
     buf[8] = (unsigned char)abytes; buf[9] = (unsigned char)(abytes >> 8);
     total = 10 + w * h * 3 + abytes;
     while (off < total) { long n = sys3(4, 1, (long)(buf + off), (long)(total - off)); if (n <= 0) sys3(1, 0, 0, 0); off += (int)n; }
+    if (g_gltrace == 3) {                                                          /* verification with VRAM: the software model's whole VRAM follows the picture */
+        const unsigned char* vp = (const unsigned char*)g_gpu_native.vram;
+        int vt = GPU_VRAM_W * GPU_VRAM_H * 2;
+        off = 0;
+        while (off < vt) { long n = sys3(4, 1, (long)(vp + off), (long)(vt - off)); if (n <= 0) sys3(1, 0, 0, 0); off += (int)n; }
+    }
     off = 0;
     while (off < want) { long n = sys3(3, 0, (long)(ans + off), (long)(want - off)); if (n <= 0) { out("the viewer closed the pipe: stopping\n"); sys3(1, 0, 0, 0); } off += (int)n; }
     g_play_pad = (unsigned)ans[0] | ((unsigned)ans[1] << 8);
@@ -1668,7 +1698,7 @@ static void frame_end(int frame, int* loop_frame) {
         else if (c >= 0x11 && c <= 0x19) {
             unsigned f;
             state_path(path, c - 0x10);
-            if (restore_state(path, &f)) { *loop_frame = (int)f; out("state "); outnum(c - 0x10); out(" loaded (frame "); outnum((long)f); out(")\n"); }     /* the frame counter continues from the state's frame (netplay: both sides agree on frame numbers) */
+            if (restore_state(path, &f)) { g_gl_full = 1; *loop_frame = (int)f; out("state "); outnum(c - 0x10); out(" loaded (frame "); outnum((long)f); out(")\n"); }     /* the frame counter continues from the state's frame (netplay: both sides agree on frame numbers) */
             else { out("no usable state in slot "); outnum(c - 0x10); out("\n"); }
         }
     }
