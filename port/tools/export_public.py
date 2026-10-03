@@ -49,7 +49,7 @@ def main():
         sys.exit('give --name and --email together')
     excludes = read_excludes()
 
-    git(['clone', '--quiet', '--no-hardlinks', str(ROOT), str(out)], cwd=ROOT.parent)
+    git(['clone', '--quiet', '--no-hardlinks', '-c', 'core.autocrlf=false', str(ROOT), str(out)], cwd=ROOT.parent)
     git(['remote', 'remove', 'origin'], cwd=out)                      # the copy must not point back at (or push to) anything
     env = dict(os.environ, FILTER_BRANCH_SQUELCH_WARNING='1')
     quoted = ' '.join('"%s"' % p for p in excludes)
