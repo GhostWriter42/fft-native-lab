@@ -30,7 +30,7 @@ if [ -n "$RUN_ONLY" ]; then
 fi
 P=/port/build/portable/src/psyq/libgte
 FN=$N/fn_names.txt
-CF="-m32 -O1 -w -std=gnu89 -funsigned-char -fcommon -ffreestanding -fno-builtin -fno-pic -fno-pie -fno-stack-protector -fno-strict-aliasing -fno-aggressive-loop-optimizations -fno-tree-loop-distribute-patterns -fwrapv -fno-omit-frame-pointer -nostdinc -I/port/native/shim -I/port/native/gte -I/port/build/portable/include -I/port/native -I$N -I/port/build/native -include psx/gte_inline.h -DPC_SCHEME $EXTRA_CFLAGS"
+CF="-m32 -O1 -w -std=gnu89 -funsigned-char -fcommon -ffreestanding -fno-builtin -fno-pic -fno-pie -fno-stack-protector -fno-strict-aliasing -fno-aggressive-loop-optimizations -fno-tree-loop-distribute-patterns -fwrapv -fno-delete-null-pointer-checks -fno-omit-frame-pointer -nostdinc -I/port/native/shim -I/port/native/gte -I/port/build/portable/include -I/port/native -I$N -I/port/build/native -include psx/gte_inline.h -DPC_SCHEME $EXTRA_CFLAGS"
 rename_defs() {   # rename defined yaml-function symbols of object $1 to native_<name>
   nm --defined-only -g "$1" | awk '{print $3}' | grep -Fxf "$FN" | awk '{print $1" native_"$1}' > "$1.map" || true
   [ -s "$1.map" ] && objcopy --redefine-syms="$1.map" "$1"

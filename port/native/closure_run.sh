@@ -3,7 +3,7 @@
 # (matching $ALLOW), up to $MAX files. Prints the growth and the final unresolved list, then LINKS + RUNS if $HARNESS is set.
 # env: ALLOW (regex on function names, default '.'), MAX (default 400), HARNESS (harness .c under /port/native), SKIP (space list)
 W=/tmp/cl; rm -rf $W; mkdir -p $W/o
-CF="-m32 -O1 -w -std=gnu89 -funsigned-char -fcommon -ffreestanding -fno-builtin -fno-pic -fno-pie -fno-stack-protector -fno-strict-aliasing -fno-aggressive-loop-optimizations -fwrapv -nostdinc -I/port/build/portable/include -I/port/native/gte -I/port/native $EXTRA_CFLAGS"
+CF="-m32 -O1 -w -std=gnu89 -funsigned-char -fcommon -ffreestanding -fno-builtin -fno-pic -fno-pie -fno-stack-protector -fno-strict-aliasing -fno-aggressive-loop-optimizations -fwrapv -fno-delete-null-pointer-checks -nostdinc -I/port/build/portable/include -I/port/native/gte -I/port/native $EXTRA_CFLAGS"
 ALLOW=${ALLOW:-.}; MAX=${MAX:-400}; SKIP=" ${SKIP} rand abs "
 LD=/port/build/native/symbols.ld
 sed -E 's/ = .*//' $LD | sort -u > $W/ld.txt

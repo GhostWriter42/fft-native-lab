@@ -14,7 +14,7 @@ DIRS=${DIRS:-"src/main src/battle"}; OUT=${OUT:-/port/build/native/all}
 FN=${FN:-/port/build/native/fn_names.txt}
 LDFILE=${LDFILE:-/port/build/native/symbols.ld}
 rm -rf "$OUT"; mkdir -p "$OUT/o"
-CF="-m32 -O1 -w -std=gnu89 -funsigned-char -fcommon -ffreestanding -fno-builtin -fno-pic -fno-pie -fno-stack-protector -fno-strict-aliasing -fno-aggressive-loop-optimizations -fwrapv -nostdinc -I/port/native/shim -I/port/native/gte -I/port/build/portable/include -include psx/gte_inline.h $EXTRA_CFLAGS"
+CF="-m32 -O1 -w -std=gnu89 -funsigned-char -fcommon -ffreestanding -fno-builtin -fno-pic -fno-pie -fno-stack-protector -fno-strict-aliasing -fno-aggressive-loop-optimizations -fwrapv -fno-delete-null-pointer-checks -nostdinc -I/port/native/shim -I/port/native/gte -I/port/build/portable/include -include psx/gte_inline.h $EXTRA_CFLAGS"
 cd /port/build/portable
 : > "$OUT/sources.txt"
 for d in $DIRS; do find $d -name '*.c' | sort >> "$OUT/sources.txt"; done

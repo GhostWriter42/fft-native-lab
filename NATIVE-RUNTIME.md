@@ -349,6 +349,12 @@ call sequences). After the fixes: **32 of 32 seeds identical over 40,000 frames*
 NULL-page accesses left: `bcopy` in `equip_entrypoint` (`g_equip_unit_data[0]` is NULL for a moment in two seeds; reads zero here, a Windows build needs a stand-in).
 Not yet analysed: `world_menu_resize_parent_entry_to_digits` calls `world_text_count_decimal_digits()` without its argument (retail leaves a stale `$a0` from the caller).
 
+**More long soaks (2026-10-03).** World-map seeds (battle-end cheat, no story events) 32 of 32 identical over 40,000 frames, no NULL-page access. AI-caster + autobattle seeds
+(`caster 0x1f {seed};autobattle 0x1f`, random encounters) 31 of 32 over 30,000 frames; the one divergence (seed 3027) was **undefined behaviour exploited by the modern compiler**:
+`battle_menu_display_projected_action_effect` reads `action->attack_accuracy` and only afterwards tests `action == 0`; gcc deletes that test (`-fdelete-null-pointer-checks`), GCC 2.6.3 does
+not. All native builds now compile with `-fno-delete-null-pointer-checks` (a policy, like `-fwrapv`); seed 3027 passes and the 32-seed random-battle regression stays 32 of 32 (30,000 frames).
+NULL-page reads still logged (retail reads zeros from console RAM): that function (action NULL), `battle_ai_load_ability_entry` (unit index from a bad packed id), `bcopy` in `equip_entrypoint`.
+
 ## 10. Open items
 
 * Audio: the SPU (XA streams, ADPCM voices, reverb) is still only logged by the HLE; the movies (MDEC) are skipped.
