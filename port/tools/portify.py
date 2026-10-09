@@ -452,6 +452,10 @@ def main():
                 dst = outdir / rel
                 text = dst.read_bytes().decode('utf-8')
                 want = pt.get('count', 1)
+                if 'done' in pt and pt['done'] in text:                                 # `done`: upstream has fixed this place itself; nothing to patch
+                    continue
+                if text.count(pt['old']) != want and 'alt' in pt:                       # `alt`: (old, new) for a later revision's spelling (renamed locals)
+                    pt = dict(pt, old=pt['alt'][0], new=pt['alt'][1])
                 if text.count(pt['old']) != want:
                     msg = f"native patch must match {want} time(s) in {rel}: {pt['old']!r} (found {text.count(pt['old'])})"
                     if os.environ.get('PATCH_KEEP_GOING'):                              # list every patch that no longer applies (after moving to a newer revision)

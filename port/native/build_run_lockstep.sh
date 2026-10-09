@@ -37,6 +37,8 @@ rename_defs() {   # rename defined yaml-function symbols of object $1 to native_
   rm -f "$1.map"
   return 0
 }
+# a newer decomp revision defines world_gs_sortpoly itself: our replacement (replacements/world_asm.c) is then left out
+[ -f /port/build/portable/src/world/world_gs_sortpoly.c ] && CF="$CF -DDECOMP_HAS_GS_SORTPOLY"
 # game-facing runtime pieces: these define yaml function names (RotTrans, rsin, battle_copy_bytes, ...), so they are renamed too
 for s in /port/native/gte/libgte_native.c $P/rsin.c $P/sin_1.c $P/rcos.c $P/ratan2.c $P/csqrt.c $P/psyq_gte_csqrt_kernel.c /port/native/replacements/main_asm.c /port/native/replacements/battle_asm.c /port/native/replacements/battle_asm2.c /port/native/replacements/battle_asm3.c /port/native/replacements/battle_thread.c /port/native/replacements/world_asm.c /port/native/replacements/world_thread.c; do
   o="$W/x_$(basename "$s" .c).o"

@@ -147,6 +147,7 @@ void wldcore_restore_previous_stack(void) {}
  * `ot` at depth `pri` through world_ps_sort_sprite_bg, which returns the new buffer cursor. The descriptor's byte 7 is the GPU command: bit 2 = textured (one
  * extra word after the first vertex, one per further vertex), bit 4 = gouraud (an extra colour word per vertex), bit 3 = a fourth vertex. The value in $a3 at entry
  * is not used: the routine counts the packet's words in it. A literal transliteration of the machine code (each optional word moves both pointers on by 4). */
+#ifndef DECOMP_HAS_GS_SORTPOLY    /* newer decomp revisions define it themselves (build_run_lockstep.sh) */
 void world_gs_sortpoly(POLY_FT4* poly, s32 arg, s32 type, u32 value) {
     const u8* src = (const u8*)poly;
     u8* start = (u8*)g_world_gs_out_packet_p;
@@ -177,6 +178,7 @@ void world_gs_sortpoly(POLY_FT4* poly, s32 arg, s32 type, u32 value) {
     }
     g_world_gs_out_packet_p = (void*)world_ps_sort_sprite_bg((u32*)start, (GsOT*)arg, type & 0xffff, (s32)words);
 }
+#endif
 
 #define BLIT_LHU(p, off) ((u32)*(const u16*)((const u8*)(p) + (off)))
 /* 4bpp image -> 4bpp image, one 32-bit word (8 pixels) at a time through nibble masks; the retail routine's behaviour is reproduced on purpose, quirks included:

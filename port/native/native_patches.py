@@ -24,6 +24,7 @@ PATCHES = [
         file='src/battle/battle_gfx_set_thrown_item_graphic_palette.c',
         old='g_main_item_item_flags = get_item_data_pointer();',
         new='g_main_item_item_flags = (u8*)main_item_get_data_pointer(graphic_id);',
+        alt=('item_data = get_item_data_pointer();', 'item_data = (u8*)main_item_get_data_pointer(graphic_id);'),     # the semantic-cleanup spelling
         why='get_item_data_pointer is main_item_get_data_pointer(item_id) (same address); the retail call loads no argument, so it receives this '
             'function\'s first parameter, which is still in $a0.',
     ),
@@ -226,6 +227,7 @@ PATCHES = [
         file='src/battle/battle_ai_choose_wait_facing.c',
         old='    do {\n        work.target_coords.bytes.x = ai->acting_unit_coords.bytes.x + g_battle_ai_facing_tile_offsets.bytes[offset];',
         new='    work.past_viable_directions = 0;\n    do {\n        work.target_coords.bytes.x = ai->acting_unit_coords.bytes.x + g_battle_ai_facing_tile_offsets.bytes[offset];',
+        done='u8 past_viable_directions;',                                      # newer upstream declares and handles the byte itself
         why='see the first entry: the past-the-end byte of the viability array is zero.',
     ),
     # --- NULL-pointer reads of console low RAM (a build that cannot map page zero, i.e. the Windows port, needs these; the oracle's low RAM reads as zero)
