@@ -22,6 +22,7 @@ def macro_names(macro):
 explicit = macro_names('HLE_EXPLICIT_NAMES')
 skip = macro_names('HLE_SKIP_NAMES')
 tick = macro_names('HLE_TICK_NAMES')
+keep = macro_names('HLE_KEEP_NAMES')           # pure-RAM SDK functions that run as real code on both machines
 hooked_libs = ('libspu', 'libetc', 'libcd', 'libcard', 'libpress')
 # libraries that are replaced natively (software GTE): the HLE calls the ORIGINAL code makes from inside them (critical sections, FlushCache ...) have no native counterpart, so the
 # interpreter side does not log them (the calls a natively compiled SDK makes are logged on both sides)
@@ -74,7 +75,7 @@ for m in mods:
                     untraced.append((int(r.group(2), 16), int(r.group(3), 16)))
         names = []
         for addr, size, name, asm in yamlfuncs.parse_lines(doc_lines):
-            if (any(lo <= addr < hi for lo, hi in ranges) or name in explicit or name in skip) and name not in names:
+            if (any(lo <= addr < hi for lo, hi in ranges) or name in explicit or name in skip) and name not in names and name not in keep:
                 names.append(name)
         per_module.append((stem, names))
         per_module_ticks.append((stem, [name for addr, size, name, asm in yamlfuncs.parse_lines(doc_lines) if name in tick]))

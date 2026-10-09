@@ -87,6 +87,11 @@ unsigned hle_call(hle_t* h, const char* name, unsigned nargs, unsigned a0, unsig
 #define HLE_SKIP_NAMES(X) \
     X(open_movie_start_stream)
 
+/* SDK functions in the hooked libraries that are NOT taken over: pure RAM bookkeeping (no hardware access), so the real code runs on both machines. The SPU heap
+ * (SpuInitMalloc / SpuMalloc / SpuFree on the game's own table) used to be a no-op that returned 0 for every allocation; the reverb getter reads the state
+ * that hle.c keeps for the replaced setters (libspu_state()). */
+#define HLE_KEEP_NAMES(X)     X(SpuInitMalloc) X(SpuMalloc) X(SpuFree) X(_spu_gcSPU) X(_SpuIsInAllocateArea) X(_SpuIsInAllocateArea_) X(SpuGetReverbModeParam)
+
 /* Functions whose ENTRY lets virtual time pass (they poll a variable that the vertical-blank interrupt updates, in a loop with no SDK call): they are
  * not replaced, only observed -- every entry calls hle_tick() on both machines (see hle.c). */
 #define HLE_TICK_NAMES(X) \

@@ -143,13 +143,113 @@ static void trace_call(hle_t* h, const char* n, unsigned a0, unsigned a1, unsign
     else if (streq(n, "CdPosToInt")) { e->a[4] = fnv(h, a0, 4); e->a[0] = 0; }
 }
 
+/* ------------------------------------------------------------------------------------------------------ libspu's own RAM state
+ * The real libspu keeps bookkeeping in main RAM that code the HLE does NOT replace reads back (the SPU heap SpuMalloc allocates from, the reverb attributes
+ * SpuGetReverbModeParam reports, the key-on mask). The replaced calls therefore update it exactly as the decomp's src/psyq/libspu sources do (_SpuInit,
+ * SpuSetKey, SpuSetReverb, SpuSetReverbModeParam, SpuSetReverbDepth); only the hardware side is left to the SPU model. Addresses: SCUS_942.21 data. */
+#define SPU_KEYSTAT        0x8002a8dcu
+#define SPU_REV_FLAG       0x8002a8e4u
+#define SPU_REV_RESERVE_WA 0x8002a8e8u
+#define SPU_REV_OFFSETADDR 0x8002a8ecu
+#define SPU_REV_MODE       0x8002a8f4u
+#define SPU_REV_DEPTH_L    0x8002a8f8u
+#define SPU_REV_DEPTH_R    0x8002a8fau
+#define SPU_REV_DELAY      0x8002a8fcu
+#define SPU_REV_FEEDBACK   0x8002a900u
+#define SPU_MEM_MODE_PLUS  0x8002ad6cu
+#define SPU_ALLOC_BLOCKS   0x8002ada0u
+#define SPU_ALLOC_LAST     0x8002ada4u
+#define SPU_MEMLIST        0x8002ada8u
+#define SPU_REV_STARTADDR  0x8002adacu
+static void wr16(hle_t* h, unsigned a, unsigned v) { h->p.w8(h->p.ctx, a, v & 0xff); h->p.w8(h->p.ctx, a + 1, (v >> 8) & 0xff); }
+static void wr32(hle_t* h, unsigned a, unsigned v) { wr16(h, a, v & 0xffff); wr16(h, a + 2, v >> 16); }
+static int spu_in_allocated_area(hle_t* h, unsigned address) {                     /* _SpuIsInAllocateArea_: does a reserved heap block reach `address`? */
+    unsigned list = rd32(h, SPU_MEMLIST), i;
+    address <<= rd32(h, SPU_MEM_MODE_PLUS);
+    if (!list) return 0;
+    for (i = 0; i < 4096; i++) {
+        unsigned start = rd32(h, list + 8 * i);
+        if (start & 0x80000000u) continue;                                        /* free block */
+        if (start & 0x40000000u) break;                                           /* the tail */
+        start &= 0x0fffffffu;
+        if (start >= address || address < start + rd32(h, list + 8 * i + 4)) return 1;
+    }
+    return 0;
+}
+/* Returns 1 when the call's result is decided here (*ret), 0 when only state was updated (or the name is not libspu's). */
+static int libspu_state(hle_t* h, const char* n, unsigned a0, unsigned a1, unsigned a2, unsigned* ret) {
+    if (n[0] != 'S' || n[1] != 'p' || n[2] != 'u') return 0;
+    if (streq(n, "SpuInit") || streq(n, "SpuInitHot")) {                          /* _SpuInit */
+        wr32(h, SPU_REV_FLAG, 0); wr32(h, SPU_REV_RESERVE_WA, 0); wr32(h, SPU_REV_MODE, 0);
+        wr16(h, SPU_REV_DEPTH_L, 0); wr16(h, SPU_REV_DEPTH_R, 0); wr32(h, SPU_REV_DELAY, 0); wr32(h, SPU_REV_FEEDBACK, 0);
+        wr32(h, SPU_REV_OFFSETADDR, rd32(h, SPU_REV_STARTADDR));
+        wr32(h, SPU_ALLOC_BLOCKS, 0); wr32(h, SPU_ALLOC_LAST, 0); wr32(h, SPU_MEMLIST, 0); wr32(h, SPU_KEYSTAT, 0);
+        return 0;
+    }
+    if (streq(n, "SpuSetKey")) {
+        unsigned bits = a1 & 0xffffffu, k = rd32(h, SPU_KEYSTAT);
+        if (a0 == 1) wr32(h, SPU_KEYSTAT, k | bits); else if (a0 == 0) wr32(h, SPU_KEYSTAT, k & ~bits);
+        return 0;
+    }
+    if (streq(n, "SpuSetReverb")) {                                               /* returns the new _spu_rev_flag */
+        if (a0 == 0) wr32(h, SPU_REV_FLAG, 0);
+        else if (a0 == 1) wr32(h, SPU_REV_FLAG, (rd32(h, SPU_REV_RESERVE_WA) != 1 && spu_in_allocated_area(h, rd32(h, SPU_REV_OFFSETADDR))) ? 0u : 1u);
+        *ret = rd32(h, SPU_REV_FLAG);
+        return 1;
+    }
+    if (streq(n, "SpuSetReverbDepth")) {
+        unsigned mask = rd32(h, a0);
+        if (mask == 0 || (mask & 2)) wr16(h, SPU_REV_DEPTH_L, h->p.r8(h->p.ctx, a0 + 8) | (h->p.r8(h->p.ctx, a0 + 9) << 8));
+        if (mask == 0 || (mask & 4)) wr16(h, SPU_REV_DEPTH_R, h->p.r8(h->p.ctx, a0 + 10) | (h->p.r8(h->p.ctx, a0 + 11) << 8));
+        return 0;
+    }
+    if (streq(n, "SpuSetReverbModeParam")) {                                      /* attr: mask, mode, depth.left/right, delay, feedback */
+        unsigned mask = rd32(h, a0), all = mask == 0, changed = 0, mode;
+        *ret = 0;
+        if (all || (mask & 1)) {
+            mode = rd32(h, a0 + 4) & ~0x100u;
+            if (mode >= 10 || spu_in_allocated_area(h, rd32(h, SPU_REV_STARTADDR + 4 * mode))) { *ret = 0xffffffffu; return 1; }
+            changed = 1;
+            wr32(h, SPU_REV_MODE, mode);
+            wr32(h, SPU_REV_OFFSETADDR, rd32(h, SPU_REV_STARTADDR + 4 * mode));
+            wr32(h, SPU_REV_FEEDBACK, mode == 7 ? 127u : 0u);
+            wr32(h, SPU_REV_DELAY, mode == 7 || mode == 8 ? 127u : 0u);
+        }
+        mode = rd32(h, SPU_REV_MODE);
+        if (all || (mask & 8)) wr32(h, SPU_REV_DELAY, (int)mode >= 7 && (int)mode < 9 ? rd32(h, a0 + 12) : 0u);
+        if (all || (mask & 0x10)) wr32(h, SPU_REV_FEEDBACK, (int)mode >= 7 && (int)mode < 9 ? rd32(h, a0 + 16) : 0u);
+        if (changed) { wr16(h, SPU_REV_DEPTH_L, 0); wr16(h, SPU_REV_DEPTH_R, 0); }
+        else {
+            if (all || (mask & 2)) wr16(h, SPU_REV_DEPTH_L, h->p.r8(h->p.ctx, a0 + 8) | (h->p.r8(h->p.ctx, a0 + 9) << 8));
+            if (all || (mask & 4)) wr16(h, SPU_REV_DEPTH_R, h->p.r8(h->p.ctx, a0 + 10) | (h->p.r8(h->p.ctx, a0 + 11) << 8));
+        }
+        return 1;
+    }
+    if (streq(n, "SpuGetVoiceEnvelopeAttr")) {
+        /* (voice, &key_stat, &envx): the envelope level is the SPU hardware's, which no machine here models in lockstep (the SPU model is attached to the
+         * native machine only, for sound). Deterministic stand-in from the key-on mask: a keyed-on voice reports full level, a keyed-off one 0 (its release is
+         * over at once). The music driver only tests envx == 0 (SMD opcode 0xFF waits for it); before, both values were left as stack garbage. Retail writes
+         * key_stat as a halfword. */
+        unsigned on = a0 < 24 && (rd32(h, SPU_KEYSTAT) >> a0) & 1u, envx = on ? 0x7fffu : 0u;
+        if (a2) wr16(h, a2, envx);
+        if (a1) wr16(h, a1, on ? 1u : 0u);
+        *ret = 0;
+        return 1;
+    }
+    return 0;
+}
+
 unsigned hle_call(hle_t* h, const char* n, unsigned nargs, unsigned a0, unsigned a1, unsigned a2, unsigned a3) {
     if (nargs < 4) a3 = 0;                                                      /* registers beyond the function's parameters carry whatever the caller left there */
     if (nargs < 3) a2 = 0;
     if (nargs < 2) a1 = 0;
     if (nargs < 1) a0 = 0;
     if (!(h->p.interp_reexec && h->vsync_left && !h->in_cb)) { h->calls++; trace_call(h, n, a0, a1, a2, a3); }      /* a re-executed VSync is one call */
-    if (h->spu) { unsigned r; if (spu_hle_call(h, h->spu, n, a0, a1, a2, a3, &r)) return r; }          /* the software SPU, when one is attached (SpuWrite is only observed: the generic code runs its callback) */
+    {   unsigned lr = 0, r;
+        int decided = libspu_state(h, n, a0, a1, a2, &lr);                       /* libspu's RAM bookkeeping first (both machines) */
+        if (h->spu && spu_hle_call(h, h->spu, n, a0, a1, a2, a3, &r)) return decided ? lr : r;   /* the software SPU, when one is attached (SpuWrite is only observed: the generic code runs its callback) */
+        if (decided) { log_call(h, n, a0, a1, a2); return lr; }
+    }          /* the software SPU, when one is attached (SpuWrite is only observed: the generic code runs its callback) */
     if (h->gpu) { unsigned r; if (gpu_hle_call(h, n, a0, a1, a2, a3, &r)) return r; }          /* the software GPU, when one is attached */
     if (streq(n, "VSync")) {
         /* VSync(0): wait for the next vertical blank; VSync(n >= 2): wait until n blanks have passed since the previous call (the machine does no work
