@@ -345,12 +345,21 @@ def main():
 
     nframes_box = [0]
     ft_rows, ft_last = [], [time.perf_counter()]
-    input_path = ROOT / 'build' / 'native' / 'ls' / 'last_input.txt'
+    # the player's sessions: last_input.txt plus a dated copy in sessions/ (headless test runs log elsewhere: a replay must never overwrite a real session)
+    if args.test_frames:
+        input_path = ROOT / 'build' / 'native' / 'ls' / 'test_input.txt'
+    else:
+        input_path = ROOT / 'build' / 'native' / 'ls' / 'last_input.txt'
+        (ROOT / 'build' / 'native' / 'ls' / 'sessions').mkdir(parents=True, exist_ok=True)
+    session_copy = None if args.test_frames else ROOT / 'build' / 'native' / 'ls' / 'sessions' / time.strftime('session_%Y%m%d_%H%M%S.txt')
     inp = {'last': 0, 'hist': [], 'pending_load': None, 'scene_start': None}  # hist: every controller change since POWER-ON as (frame, mask): exact even across state loads
     import json as json_
 
     def write_input_log():                                  # frame:mask,frame:mask,...  (the format of --script / --replay)
-        input_path.write_text(''.join(f'{f}:0x{m:x},' for f, m in inp['hist']), encoding='ascii')
+        text = ''.join(f'{f}:0x{m:x},' for f, m in inp['hist'])
+        input_path.write_text(text, encoding='ascii')
+        if session_copy is not None:
+            session_copy.write_text(text, encoding='ascii')
 
     write_input_log()                                       # (empty: a new session)
     # the memory card as it was at power-on is part of what a replay needs (Continue / the save screen read it): keep a copy per session
