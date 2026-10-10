@@ -1937,7 +1937,7 @@ static int main_test(void) {
         else { cpu.fault = 0; cpu.pc = cpu.r[31]; cpu.npc = cpu.pc + 4; }         /* the HLE'd VSync returns to its caller */
         frame_end(frame, &frame);
     }
-    if (g_audio) { out("spu: "); outnum((long)g_spu_native.n_writes); out(" sample uploads, "); outnum((long)g_spu_native.n_keyons); out(" key-ons, transfer address 0x"); outhex(g_spu_native.tsa); out("\n"); }
+    if (g_audio) { out("spu: "); outnum((long)g_spu_native.n_writes); out(" sample uploads, "); outnum((long)g_spu_native.n_keyons); out(" key-ons, "); outnum((long)g_spu_native.n_noise_frames); out(" samples with noise, "); outnum((long)g_spu_native.n_pmod_frames); out(" with pitch modulation, transfer address 0x"); outhex(g_spu_native.tsa); out("\n"); }
     if (g_native_only) { out("== "); outnum((long)g_frames); out(" frames run (the native game alone: nothing was compared)\n"); }
     else { out("== "); outnum((long)g_frames); out(" frames: RAM identical at every VSync\n"); }
     report_stubs();

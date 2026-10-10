@@ -1,8 +1,8 @@
 #ifndef SPU_H
 #define SPU_H
 /* A software model of the PlayStation SPU, driven at the level of the libspu SDK calls the game makes (the same level as the GPU model): 24 ADPCM voices with pitch, the
- * ADSR envelope, per-voice and master volume, key on / off, the transfer of sample data into the 512 KiB sound RAM, mixed to 44.1 kHz stereo. Not modelled: the reverb unit,
- * noise, pitch modulation, volume sweeps, CD audio. The model never feeds anything back to the game (voice status is derived), so it cannot change the game's behaviour:
+ * ADSR envelope, per-voice and master volume, key on / off, the transfer of sample data into the 512 KiB sound RAM, the reverb unit, the noise generator and pitch
+ * modulation, mixed to 44.1 kHz stereo. Not modelled: volume sweeps, CD audio (the game streams none). The model never feeds anything back to the game (voice status is derived), so it cannot change the game's behaviour:
  * it only turns the SDK calls into sound. Freestanding C. */
 
 #define SPU_RAM_BYTES (512 * 1024)
@@ -23,6 +23,7 @@ typedef struct spu_voice {
     short nbuf[28];                                                             /* the NEXT block, decoded ahead so that the interpolation can look past the end of the current one */
     int nflags, nvalid;
     unsigned naddr;
+    int last_out;                                                               /* this sample's output after the envelope (the next voice's pitch modulation reads it) */
 } spu_voice_t;
 
 typedef struct spu {
@@ -37,7 +38,9 @@ typedef struct spu {
     unsigned rev_base, rev_cur;                                                 /* work area start (bytes) and the moving buffer pointer */
     int rev_out_l, rev_out_r, rev_phase;
     unsigned keystat;                                                           /* voices keyed on */
-    unsigned n_writes, n_keyons;                                                /* statistics */
+    unsigned noise_voices, pmod_voices;                                         /* SpuSetNoiseVoice / SpuSetPitchLFOVoice: voices that play the noise generator / whose pitch follows the previous voice */
+    int noise_clock, noise_level, noise_timer;                                  /* SpuSetNoiseClock (0..63) and the generator's state */
+    unsigned n_writes, n_keyons, n_noise_frames, n_pmod_frames;                 /* statistics (frames: mixed 44.1 kHz samples with any noise / pitch-modulated voice) */
 } spu_t;
 
 struct hle;

@@ -85,6 +85,12 @@ int spu_hle_call(hle_t* h, spu_t* s, const char* n, unsigned a0, unsigned a1, un
         if (a0 < 10 && s->rev_start) { unsigned b = rd32(h, s->rev_start + a0 * 4u) << 3, i; for (i = b; i < SPU_RAM_BYTES; i++) s->ram[i] = 0; }
         return 0;
     }
+    if (streq(n, "SpuSetNoiseVoice") || streq(n, "SpuSetPitchLFOVoice")) {       /* (on_off, voice bits): 1 = add, 0 = remove, 8 = exactly these (_SpuSetAnyVoice) */
+        unsigned* m = n[6] == 'N' ? &s->noise_voices : &s->pmod_voices, bits = a1 & 0xffffffu;
+        if (a0 == 1) *m |= bits; else if (a0 == 0) *m &= ~bits; else if (a0 == 8) *m = bits;
+        return 1;                                                               /* (the result stays the generic 0: the model must not change what the game sees) */
+    }
+    if (streq(n, "SpuSetNoiseClock")) { int c = (int)a0; s->noise_clock = c < 0 ? 0 : c > 63 ? 63 : c; return 1; }
     if (streq(n, "SpuSetCommonAttr")) {                                         /* the main volume (mask bit 0 / all) */
         unsigned mask = rd32(h, a0);
         if (mask == 0 || (mask & 1)) {
@@ -243,16 +249,31 @@ static void reverb_cycle(spu_t* s, int in_l, int in_r) {
     s->rev_cur += 2; if (s->rev_cur >= SPU_RAM_BYTES) s->rev_cur = s->rev_base;
 }
 
+/* The noise generator (psx-spx, "SPU Noise Generator"): a 16-bit shift register fed with the parity of bits 15, 12, 11, 10 (inverted), stepped by a timer whose rate the
+ * clock (shift = clock >> 2, step = (clock & 3) + 4) sets; one call per 44.1 kHz sample. */
+static void noise_tick(spu_t* s) {
+    int shift = s->noise_clock >> 2, step = (s->noise_clock & 3) + 4, lv = s->noise_level;
+    int parity = ((lv >> 15) ^ (lv >> 12) ^ (lv >> 11) ^ (lv >> 10) ^ 1) & 1;
+    s->noise_timer -= step;
+    if (s->noise_timer < 0) {
+        s->noise_level = (short)((lv << 1) + parity);
+        s->noise_timer += 0x20000 >> shift;
+        if (s->noise_timer < 0) s->noise_timer += 0x20000 >> shift;
+    }
+}
+
 void spu_mix(spu_t* s, short* out, int n) {
     int i, k;
     for (i = 0; i < n; i++) {
         int l = 0, r = 0, rl = 0, rr = 0;
+        if (s->noise_voices) { noise_tick(s); s->n_noise_frames++; }
+        if (s->pmod_voices) s->n_pmod_frames++;
         for (k = 0; k < SPU_VOICES; k++) {
             spu_voice_t* v = &s->v[k];
             int idx, frac, smp, vl, vr;
-            if (!v->on) continue;
+            if (!v->on) { v->last_out = 0; continue; }
             if (v->blocks == -1) decode_block(s, v);
-            if (!v->on) continue;
+            if (!v->on) { v->last_out = 0; continue; }
             idx = (int)(v->pos >> 12); frac = (int)(v->pos & 0xfff);
             {   /* 4-point cubic (Catmull-Rom) through the samples idx-1 .. idx+2, which may lie in the previous / next block: no steps at block boundaries */
                 int p0 = v->buf[idx + 2], p1 = v->buf[idx + 3], p2, p3;
@@ -262,12 +283,20 @@ void spu_mix(spu_t* s, short* out, int n) {
                 r = (float)p1 + 0.5f * x * ((float)(p2 - p0) + x * ((float)(2 * p0 - 5 * p1 + 4 * p2 - p3) + x * (float)(3 * (p1 - p2) + p3 - p0)));
                 smp = r > 32767.0f ? 32767 : (r < -32768.0f ? -32768 : (int)r);
             }
+            if (s->noise_voices & (1u << k)) smp = (short)s->noise_level;        /* a noise voice plays the generator; its ADPCM still runs (loop / end flags) */
             env_tick(v);
             smp = (smp * v->level) >> 15;
+            v->last_out = smp;
             vl = (smp * gain(v->vol_l)) >> 14; vr = (smp * gain(v->vol_r)) >> 14;
             l += vl; r += vr;
             if (s->rev_voices & (1u << k)) { rl += vl; rr += vr; }
-            v->pos += v->pitch > 0x3fff ? 0x3fff : v->pitch;
+            {   unsigned step = v->pitch;
+                if (k > 0 && (s->pmod_voices & (1u << k))) {                      /* pitch modulation: step * (previous voice's output + 0x8000) / 0x8000 */
+                    step = ((unsigned)((int)step * (s->v[k - 1].last_out + 0x8000)) >> 15) & 0xffffu;
+                    if (step > 0x3fff) step = 0x4000;
+                }
+                v->pos += step > 0x3fff ? 0x3fff : step;
+            }
             if (v->pos >= (28u << 12)) { v->pos -= 28u << 12; next_block(s, v); }
         }
         if (s->rev_on) {
