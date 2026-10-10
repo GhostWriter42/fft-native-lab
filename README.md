@@ -3,26 +3,27 @@
 Experiments around [adamrt/fft_decomp](https://github.com/adamrt/fft_decomp), the byte-exact decompilation of Final Fantasy Tactics (PS1, US, SCUS-94221).
 The goal is an HD build and, later, multiplayer. Work in progress; nothing here contains game data (see "What is not here").
 
-## Where this stands (updated 2026-10-03)
+## Where this stands (updated 2026-10-09)
 
 | Area | State |
 |---|---|
 | Native build | The decomp's C compiles with a modern compiler and runs the whole game from the title screen through the first battle, the world map and the menus, on a small platform layer (software GPU, software sound chip, CD reader). |
 | Proof of correctness | A MIPS R3000 interpreter runs the **original machine code** from your disc next to the native build; RAM, scratchpad, every SDK call and VRAM are compared at every frame. Hundreds of random-play runs of 12,000-60,000 frames are identical (latest: 32 random-battle seeds x 30,000 frames on the current upstream base). |
-| Playable window | `play.ps1` (Python/Tk, slow: the CPU draws) and `play.ps1 -Gl`: **the graphics card draws** (OpenGL), at 1x-4x the original resolution, keyboard + sound + save states + fast-forward. Title screen, New Game (name and birthday entry), the opening scene and the first battle are playable; diagnostics: `-Record` (frame ring buffer, flashing detector), `-Compare` (live GPU vs software picture), controller input of every session is logged and replayable. |
+| Playable window | `play.ps1` (Python/Tk, slow: the CPU draws) and `play.ps1 -Gl`: **the graphics card draws** (OpenGL), at 1x-4x the original resolution, keyboard or gamepad, sound, save states, fast-forward, optional EPX texture filter (`-Filter`, T). **The game saves and loads** on a virtual memory card (`port/build/states/memcard0.mcr`, a standard `.mcr` image). Diagnostics: `-Record` (frame ring buffer, flashing detector), `-Compare` (live GPU vs software picture), the controller input of every session is logged and replayable |
 | GPU renderer | The game's GPU command trace is replayed on the GPU; checked pixel by pixel against the software GPU on ~54,000 frames (title, dialogue, battle map, world map): 100% of frames within tolerance, 0.5-2 ms per frame. See `NATIVE-RUNTIME.md` "Result 9". |
-| Sound | The game's sound driver runs; a software SPU (ADPCM, ADSR, reverb, 4-point cubic resampling across ADPCM blocks) plays through Windows audio, paced by the audio clock (no dropped chunks). Heard by the owner on 2026-10-03: "sounds normal" after the resampling and buffering fixes. Noise generator, pitch modulation and XA streams are not modelled. |
-| Two players | Deterministic lockstep over TCP (only controllers are sent), late join, hot-seat and AI-ally control. Tested headless; not yet with the GPU viewer. |
-| HD | 2x-4x rendering on the GPU; texture filtering and replacement art are the next steps. |
+| Sound | The game's sound driver runs; a software SPU (ADPCM, ADSR, reverb, noise generator, pitch modulation, 4-point cubic resampling across ADPCM blocks) plays through Windows audio, paced by the audio clock. libspu's own bookkeeping (the SPU heap, reverb attributes, key-on mask) is kept as the real library keeps it. The game streams no CD-XA audio |
+| Two players | Deterministic lockstep over TCP (only controllers are sent), hot-seat and AI-ally control; in the GPU viewer too (`-Gl -HostPort` / `-Join`, `-Gl -Two` with two gamepads on one computer; tested: 3,000 frames, 49 state-hash checks equal). Joining a game in progress needs the CPU viewer |
+| HD | 2x-4x rendering on the GPU with an optional EPX texture filter; replacement art is the next step. Widescreen needs game-side changes (projection, culling, 2-D layout), not a renderer option |
 
 Details and evidence: `NATIVE-RUNTIME.md` (design + results), `OVERNIGHT-REPORT.md` (newest first), `port/README.md` (every script), `HOW-TO-PLAY.md`.
 
-**Known issues / next** (2026-10-03)
+**Known issues / next** (2026-10-09)
 
-* **Fixed 2026-10-03:** the opening scene's terrain rendered red because the software GTE did not implement its colour / lighting commands (NCS, NCT, ...); they are implemented and unit-tested now (`NATIVE-RUNTIME.md` "Result 11"). To re-check: the battle maps' old green / magenta tint, and further GTE hardware details (flag bits, the MVMVA far-colour quirk).
-* **Platform-layer fidelity audit**: the flashing, text-less name-entry screen was caused by two SDK calls that the layer replaces (`PutDrawEnv`, `ResetGraph`) not keeping library state that the game's own code reads later; both are fixed (`NATIVE-RUNTIME.md` "Result 10"). The same class of bug may hide in other replaced calls, and the lockstep tests cannot see it because both machines share the layer: every replaced call will be audited against the real library code.
-* **Scenes**: recording gameplay from save states as named, replayable scenes (state + controller log; the viewer already logs and replays controller input) to regression-test screens the random-play soaks never reach.
-* The viewer has no two-player hooks yet, no texture filtering / widescreen on the GPU path, and sound lacks the noise generator, pitch modulation and CD-XA.
+* **Scenes**: recorded gameplay replays as a regression test (`port/tools/scene.py`; F9 in the GPU viewer). Two scenes from the owner's first session (power-on to the end of the first battle; victory, story scene and saving) are identical to the original code at every frame (`NATIVE-RUNTIME.md` Result 15).
+* **Platform-layer audit**: `port/tools/hle_audit.py` lists the state each replaced SDK call must keep. libgpu (Result 10) and libspu (Result 13) are fixed and the memory card is new (Result 14); the GTE's flag bits are still to be reviewed.
+* **Effect overlays**: 110 of the 512 effect files are code (the rest are scripts the battle code interprets). A test that forces abilities onto code-type effects crashes natively in the effect-script reader; not yet known whether the original misbehaves the same way there (Result 16).
+* **A Windows build without Docker**: planned, not started (`WINDOWS-NATIVE.md`).
+* The first battle's "no end condition" report (2026-10-08) was not reproduced: the battle ends, the story continues and the game saves.
 
 ## How this differs from the repository it was forked from
 
