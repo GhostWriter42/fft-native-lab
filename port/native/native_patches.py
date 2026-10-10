@@ -338,4 +338,65 @@ dict(
         new='s32 battle_map_command_get_texture_animation_active(s32 value) {\n    return battle_map_dispatch_map_data_command(',
         why='twin of battle_map_command_get_3d_object_state.c.',
     ),
+    # --- the return-value sweep (port/tools/return_type_scan.py: GCC -Wreturn-type over every source; values read with port/tools/retail_dis.py).
+    # The other hits are harmless: the effect-file templates are only called through void function pointers, the *_thread_exit_current
+    # paths never return, and the rest have no caller that reads the value.
+    dict(
+        file='src/battle/battle_script_filter_unit_id_by_mode.c',
+        old='        return i == BATTLE_STATUS_BYTE_COUNT;\n    }\n}',
+        new='        return i == BATTLE_STATUS_BYTE_COUNT;\n    }\n    return 5;\n}',
+        why='a mode outside 0..5 falls off the end; retail returns the 5 its last mode comparison left in $v0 (ori $v0,$zero,5 at 0x80147afc). '
+            'Callers test the result in an if.',
+    ),
+    dict(
+        file='src/world/world_script_filter_unit_id_by_mode.c',
+        old='        return (team_flags & 0x30) != 0 && i == BATTLE_STATUS_BYTE_COUNT;\n    }\n}',
+        new='        return (team_flags & 0x30) != 0 && i == BATTLE_STATUS_BYTE_COUNT;\n    }\n    return 5;\n}',
+        why='twin of battle_script_filter_unit_id_by_mode.c (ori $v0,$zero,5 at 0x800faf68).',
+    ),
+    dict(
+        file='src/battle/battle_unit_generate_treasure.c',
+        old='    if (g_battle_action_state != BATTLE_ACTION_STATE_EXECUTE) {\n        return;',
+        new='    if (g_battle_action_state != BATTLE_ACTION_STATE_EXECUTE) {\n        return (u8)g_battle_action_state;',
+        why='the early exit returns with g_battle_action_state still in $v0 (lw $v0 / bnez at 0x80180a0c); the caller stores the low byte as '
+            'the crystal pickup\'s treasure item.',
+    ),
+    dict(
+        file='src/world/world_script_handle_tutorial_command_end.c',
+        old='s32 world_script_handle_tutorial_command_end(void) {\n    if (g_world_script_tutorial_command_active != 0) {\n'
+            '        if (world_gfx_update_fade_out_tile() == 0) {',
+        new='s32 world_script_handle_tutorial_command_end(void) {\n    s32 fading;\n\n    if (g_world_script_tutorial_command_active != 0) {\n'
+            '        if ((fading = world_gfx_update_fade_out_tile()) == 0) {',
+        why='see the next patch.',
+    ),
+    dict(
+        file='src/world/world_script_handle_tutorial_command_end.c',
+        old='            return 0;\n        }\n    } else {\n        world_gfx_start_increasing_fade();\n        g_world_script_tutorial_command_active = 1;\n    }\n}',
+        new='            return 0;\n        }\n        return fading;\n    } else {\n        world_gfx_start_increasing_fade();\n'
+            '        g_world_script_tutorial_command_active = 1;\n        return 1;\n    }\n}',
+        why='both "not finished" paths fall off the end; world_script_handle_tutorial_command returns the value. Retail: while fading, the '
+            'nonzero world_gfx_update_fade_out_tile result is still in $v0 (bnez at 0x8012dd00); on the first call the 1 just stored to '
+            'g_world_script_tutorial_command_active (0x8012dda4).',
+    ),
+    dict(
+        file='src/event/attack_load_scenario_conditionals.c',
+        old='        value = g_scenario_event_finish_operations[battle_script_get_variable(EVENT_SCRIPT_VAR_CURRENT_EVENT)];\n'
+            '        if (value == 0) {\n            return;',
+        new='        event = battle_script_get_variable(EVENT_SCRIPT_VAR_CURRENT_EVENT);\n        value = g_scenario_event_finish_operations[event];\n'
+            '        if (value == 0) {\n            return event << 1;',
+        why='the entry-mode-2 exits return no value and the init_attack_resources callers test it. Retail: with no finish operation $v0 still '
+            'holds the event index times two (the table offset, sll at 0x801c3550).',
+    ),
+    dict(
+        file='src/event/attack_load_scenario_conditionals.c',
+        old='        if (id == 0) {\n            return;',
+        new='        if (id == 0) {\n            return 0;',
+        why='retail: $v0 = the zero high byte of the id (or the exhausted loop test), 0.',
+    ),
+    dict(
+        file='src/event/attack_load_scenario_conditionals.c',
+        old='        g_main_special_portrait_unit_id = scenario->unit_id;\n        return;',
+        new='        g_main_special_portrait_unit_id = scenario->unit_id;\n        return scenario->unit_id;',
+        why='retail: $v0 = the unit id byte just stored (lbu $v0,0xe($s1) at 0x801c35c4).',
+    ),
 ]
