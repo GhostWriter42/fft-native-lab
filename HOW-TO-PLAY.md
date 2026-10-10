@@ -52,7 +52,7 @@ top = Triangle, bumpers = L1/R1, triggers = L2/R2, Back = Select, Start = Start,
 
 **Fast effects**: `-FastEffects` plays ability effects at 60 fps. The original game paces the battle at 15-30 fps while an effect plays (`battle_state_sync_frame` waits 2-4 vertical blanks per frame), which is faithful but slow; the option only changes how many blanks it waits in those two battle states, music keeps its timing. Not the original behaviour, so it is off by default.
 
-**Test save states**: `python port	ools\make_test_states.py` makes F5 = the first battle starting, F6 = the end of that battle (the victory scene follows), F7 = the second battle's deployment screen. A state loads only into the build that wrote it: run the script again after rebuilding.
+**Test save states**: `python port\tools\make_test_states.py` makes F5 = the first battle starting, F6 = the end of that battle (the victory scene follows), F7 = the second battle's deployment screen. A state loads only into the build that wrote it: run the script again after rebuilding.
 
 **Texture filter**: `-Gl -Filter` (or T while playing) smooths the game's textures at 2x-4x (EPX, as in the CPU viewer's HD mode).
 Save / load states are disabled while two play. Both players need the same build and their own disc image.
