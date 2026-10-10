@@ -5,7 +5,8 @@
 # -Verify  also runs the ORIGINAL machine code next to it (R3000 interpreter) and compares RAM and VRAM at every frame: the game stops with a report if they ever differ (slower)
 # Keys: arrows, Z = Cross, X = Circle, A = Square, S = Triangle, Q/W = L1/R1, E/R = L2/R2, Enter = Start, Backspace = Select, P = pause, Tab = fast forward, F12 = screenshot,
 #       F1-F4 save the whole machine state to a slot, F5-F8 load it.  No sound (SPU/XA are not modelled yet), movies are skipped.
-# -Gl  draw with the graphics card (OpenGL; -Hd 1..4 is then the internal resolution factor, default 2): play_gl.py
+# -Gl  draw with the graphics card (OpenGL; -Hd 1..4 is then the internal resolution factor, default 2): play_gl.py. With -Gl: -Filter = EPX texture filter (T toggles),
+#      -Two = two players on this computer (controller 2 = the second gamepad), -HostPort / -Join = two players over the network; gamepads work as controllers
 # -Build   (re)compile and link the program first (automatic when there is none yet); -WorldCheat  skip the first battle (jump to the world map)
 # Two players (every player runs their own copy of the game; only the controllers cross the network -- see netplay.py):
 #   .\port\native\play.ps1 -HostPort 7777        wait for the other player, then start together (you are player 1)
@@ -13,7 +14,7 @@
 #   .\port\native\play.ps1 -Join 192.168.1.20:7777   join the other player (you are player 2); -Delay N input delay in frames (default 6)
 #   the host decides the rules: -Seat2 MASK (battle unit slots player 2 plays, default 0x1a) -Hotseat MASK (slots made player-controlled, default 0x1e = the AI allies of the first battle) -RandomBattle
 # FFT_LS_VOL selects the docker volume that holds the compiled program (default fft-ls-objs).
-param([int]$Hd = 0, [int]$Scale = 3, [switch]$Build, [switch]$WorldCheat, [switch]$Verify, [int]$HostPort = 0, [int]$Invite = 0, [string]$Join = '', [int]$Delay = 6, [string]$Seat2 = '0x1a', [string]$Hotseat = '0x1e', [switch]$RandomBattle, [switch]$Gl, [switch]$Compare, [switch]$Record)
+param([int]$Hd = 0, [int]$Scale = 3, [switch]$Build, [switch]$WorldCheat, [switch]$Verify, [int]$HostPort = 0, [int]$Invite = 0, [string]$Join = '', [int]$Delay = 6, [string]$Seat2 = '0x1a', [string]$Hotseat = '0x1e', [switch]$RandomBattle, [switch]$Gl, [switch]$Compare, [switch]$Record, [switch]$Two, [switch]$Filter)
 . (Join-Path $PSScriptRoot 'padgen.ps1')
 $vol = if ($env:FFT_LS_VOL) { $env:FFT_LS_VOL } else { 'fft-ls-objs' }
 $have = ((docker run --rm --pull=never --volume "${vol}:/ob" fft-decomp-dev:local sh -c 'test -x /ob/ls_pc/prog && echo yes' 2>$null) -join '').Trim()
@@ -22,7 +23,7 @@ if ($Build -or $have -ne 'yes') {
     & (Join-Path $PSScriptRoot 'lockstep.ps1') -BuildOnly -Scenario title -Gpu | Select-Object -Last 3 | Out-Host
     if ($LASTEXITCODE -ne 0) { Write-Error 'the build failed'; exit 1 }
 }
-if ($HostPort -or $Invite -or $Join) {
+if (($HostPort -or $Invite -or $Join) -and -not $Gl) {
     $pyArgs = @('--scale', $Scale, '--delay', $Delay)
     if ($Hd -ge 2) { $pyArgs += @('--hd', $Hd) }
     if ($HostPort) { $pyArgs += @('--host', $HostPort, '--seat2', $Seat2, '--hotseat', $Hotseat) }
@@ -46,6 +47,11 @@ if ($Gl) {                                                     # the graphics ca
     [System.IO.File]::WriteAllText($cfg, ($text.TrimEnd() + "`naudio 1`nmemcard /states/memcard0.mcr`ngltrace 1`nplay 2`n"))
     $glScale = if ($Hd -ge 1) { $Hd } else { 2 }
     $glArgs = @('--scale', $glScale, '--cfg', $cfg)
+    if ($Filter) { $glArgs += @('--filter', 'epx') }
+    if ($Two) { $glArgs += @('--two', '--seat2', $Seat2, '--hotseat', $Hotseat) }
+    if ($HostPort) { $glArgs += @('--host', $HostPort, '--delay', $Delay, '--seat2', $Seat2, '--hotseat', $Hotseat) }
+    if ($Join) { $glArgs += @('--join', $Join, '--delay', $Delay) }
+    if ($Invite) { Write-Error '-Invite (joining a game in progress) is not available with -Gl yet: use -HostPort'; exit 1 }
     if ($Compare) { $glArgs += '--compare' }
     if ($Record) { $glArgs += '--record' }
     & $venvPy (Join-Path $PSScriptRoot 'play_gl.py') @glArgs

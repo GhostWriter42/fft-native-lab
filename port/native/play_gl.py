@@ -38,6 +38,9 @@ BIN = ROOT.parent / 'game' / 'Final Fantasy Tactics.bin'
 VOL = os.environ.get('FFT_LS_VOL', 'fft-ls-objs')
 STATES = ROOT / 'build' / 'states'
 
+GAMEPAD_BUTTONS = {glfw.GAMEPAD_BUTTON_A: 0x40, glfw.GAMEPAD_BUTTON_B: 0x20, glfw.GAMEPAD_BUTTON_X: 0x80, glfw.GAMEPAD_BUTTON_Y: 0x10,
+                   glfw.GAMEPAD_BUTTON_LEFT_BUMPER: 0x04, glfw.GAMEPAD_BUTTON_RIGHT_BUMPER: 0x08, glfw.GAMEPAD_BUTTON_BACK: 0x100, glfw.GAMEPAD_BUTTON_START: 0x800,
+                   glfw.GAMEPAD_BUTTON_DPAD_UP: 0x1000, glfw.GAMEPAD_BUTTON_DPAD_RIGHT: 0x2000, glfw.GAMEPAD_BUTTON_DPAD_DOWN: 0x4000, glfw.GAMEPAD_BUTTON_DPAD_LEFT: 0x8000}
 KEYS = {glfw.KEY_UP: 0x1000, glfw.KEY_RIGHT: 0x2000, glfw.KEY_DOWN: 0x4000, glfw.KEY_LEFT: 0x8000, glfw.KEY_ENTER: 0x800, glfw.KEY_KP_ENTER: 0x800, glfw.KEY_BACKSPACE: 0x100,
         glfw.KEY_Z: 0x40, glfw.KEY_X: 0x20, glfw.KEY_A: 0x80, glfw.KEY_S: 0x10, glfw.KEY_Q: 0x04, glfw.KEY_W: 0x08, glfw.KEY_E: 0x01, glfw.KEY_R: 0x02, glfw.KEY_SPACE: 0x800}
 
@@ -89,6 +92,12 @@ def main():
     ap.add_argument('--record', action='store_true', help='diagnostic: keep the last ~4 seconds of frames in memory and write them to port/build/shots/record-<time>/ when flashing is detected, on F10 and on exit')
     ap.add_argument('--pace', action='store_true', help='limit to 60 frames per second by the clock (for the headless test, where there is no vsync; with sound the audio queue already paces)')
     ap.add_argument('--test-audio', action='store_true', help='with --test-frames: play the sound too (default: muted in the headless test)')
+    ap.add_argument('--two', action='store_true', help='two players on this computer: controller 2 is the second gamepad; in battle the units in --seat2 are played with it')
+    ap.add_argument('--host', type=int, metavar='PORT', help='two players over the network: wait for the other player on this TCP port, then start together (you are player 1)')
+    ap.add_argument('--join', metavar='HOST:PORT', help='two players over the network: connect to the host (you are player 2)')
+    ap.add_argument('--delay', type=int, default=6, help='network play: input delay in frames (hides the latency)')
+    ap.add_argument('--hotseat', default='0x1e', help='two players: battle unit slots made player-controlled, as a bit mask (default: the AI allies of the first battle)')
+    ap.add_argument('--seat2', default='0x1a', help='two players: battle unit slots that player 2 plays, as a bit mask')
     ap.add_argument('--test-frames', type=int, default=0, help='headless self-test: hidden window, the title-to-battle script, exit after N frames and print a summary')
     args = ap.parse_args()
     S = max(1, min(4, args.scale))
@@ -114,6 +123,32 @@ def main():
             cfg_text = cfg_text.replace('gltrace 1', 'gltrace 2')
     else:
         cfg_text = 'frames 0\naudio 1\nmemcard /states/memcard0.mcr\ngltrace %d\nplay 2\n' % (2 if args.compare else 1)
+    two_seats = bool(args.two or args.host or args.join)
+    net = None
+    if args.join:                                                               # the host decides the configuration
+        import netplay
+        h_, _, port_ = args.join.rpartition(':')
+        print(f'connecting to {h_ or "127.0.0.1"}:{port_} ...')
+        net = netplay.Lockstep(netplay.join(h_ or '127.0.0.1', int(port_)), False, args.delay)
+        got = net.wait_blob([b'C'])
+        if not got:
+            sys.exit('the host did not send its configuration')
+        cfg_text = got[1][1].decode()
+        if not net.wait_blob([b'N']):
+            sys.exit('the host did not start the game')
+        print('connected: you are player 2 (controller 2)')
+    elif two_seats:
+        extra = f'seats 2\nseat2units {args.seat2}\nhotseat {args.hotseat}\n' + ('hashevery 60\n' if args.host else '')
+        cfg_text = cfg_text.replace('play 2', extra + 'play 2')
+        if args.host:                                                           # both games must start from identical memory: a blank card (saves are not kept in network play)
+            cfg_text = re.sub(r'^memcard .*\n', '', cfg_text, flags=re.M)
+            import netplay
+            print(f'waiting for the other player on port {args.host} (they run: play_gl.py --join <this computer>:{args.host}) ...')
+            conn, addr = netplay.host(args.host)
+            net = netplay.Lockstep(conn, True, args.delay)
+            net.send_blob(b'C', 0, cfg_text.encode())
+            net.send_blob(b'N', 0, b'')
+            print(f'player 2 connected from {addr[0]}: you are player 1')
     if args.test_frames:                                                        # headless tests never touch the player's memory card
         cfg_text = cfg_text.replace('memcard /states/memcard0.mcr', 'memcard /states/memcard_test.mcr')
     session = ROOT / 'build' / 'session' / name
@@ -137,7 +172,7 @@ def main():
            '--volume', f'{ROOT}:/port', '--volume', f'{VOL}:/ob', '--volume', f'{REPO}\\build\\extracted\\files:/disc:ro', '--volume', f'{BIN}:/disc.bin:ro',
            '--volume', f'{session}:/session', '--volume', f'{STATES}:/states', 'fft-decomp-dev:local', 'sh', '/port/native/build_run_lockstep.sh']
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
-    err = {'last': ''}
+    err = {'last': '', 'who': 1}
 
     def err_reader():
         with open(log_path, 'w', encoding='utf-8') as log:
@@ -145,6 +180,13 @@ def main():
                 t = line.decode('utf-8', 'replace').rstrip()
                 log.write(t + '\n')
                 log.flush()
+                if net is not None and t.startswith('H '):
+                    _, hn, hh = t.split()
+                    net.report_hash(int(hn), int(hh, 16))                       # this game's state hash: compared with the other player's (desync check)
+                    continue
+                m_ = re.search(r'controller (\d) plays now', t)
+                if m_:
+                    err['who'] = int(m_.group(1))
                 if any(k in t for k in ('FRAME', 'CRASH', 'HANG', 'differs', 'stopping', 'NATIVE', 'state ')):
                     print(t, file=sys.stderr)
                     err['last'] = t[:120]
@@ -214,14 +256,42 @@ def main():
     if args.fullscreen:
         on_key(win, glfw.KEY_F11, 0, glfw.PRESS, 0)
 
+    def gamepad_mask(jid):                                  # positional, like the PS controller: A/B/X/Y = Cross/Circle/Square/Triangle
+        if not glfw.joystick_is_gamepad(jid):
+            return 0
+        st = glfw.get_gamepad_state(jid)
+        if not st:
+            return 0
+        m = 0
+        for b, bit in GAMEPAD_BUTTONS.items():
+            if st.buttons[b]:
+                m |= bit
+        ax = st.axes
+        if ax[0] < -0.5:
+            m |= 0x8000
+        if ax[0] > 0.5:
+            m |= 0x2000
+        if ax[1] < -0.5:
+            m |= 0x1000
+        if ax[1] > 0.5:
+            m |= 0x4000
+        if ax[4] > 0.5:
+            m |= 0x01                                       # left trigger = L2
+        if ax[5] > 0.5:
+            m |= 0x02                                       # right trigger = R2
+        return m
+
     def pad_mask():
         if args.test_frames:
-            return test_pad(state['n'] + 1)
+            return 0 if args.join else test_pad(state['n'] + 1)
         m = 0
         for k, bit in KEYS.items():
             if glfw.get_key(win, k) == glfw.PRESS:
                 m |= bit
-        return m
+        return m | gamepad_mask(glfw.JOYSTICK_1)
+
+    def pad2_mask():                                        # local two players: the second gamepad
+        return 0 if args.test_frames else gamepad_mask(glfw.JOYSTICK_2)
 
     # ---- diagnostics (--compare / --record)
     import collections
@@ -415,16 +485,46 @@ def main():
                     if nframes % 15 == 0 and time.time() - flash['last_dump'] > 10 and flashing():
                         flash['last_dump'] = time.time()
                         dump_record('flashing detected: the picture alternates frame by frame')
-            proc.stdin.write(struct.pack('<HB', pad, state['cmd']))
+            if net is not None:                                     # network play: my controller goes out (delayed), both controllers of the next frame come back
+                state['cmd'] = 0                                    # (no state saves / loads: the two games must stay identical)
+                r_ = None
+                while True:
+                    r_ = net.step(frame, pad)
+                    if r_ is not None:
+                        break
+                    if net.closed:
+                        print(f'the other player left the game at frame {frame}' + (f' (DESYNC at frame {net.desync[0]})' if net.desync else ''))
+                        state['quit'] = True
+                        break
+                    glfw.poll_events()
+                    if state['quit'] or glfw.window_should_close(win):
+                        break
+                    time.sleep(0.001)
+                if r_ is None:
+                    break
+                proc.stdin.write(struct.pack('<HHB', r_[0], r_[1], 0))
+            elif two_seats:
+                proc.stdin.write(struct.pack('<HHB', pad, pad2_mask(), state['cmd']))
+            else:
+                proc.stdin.write(struct.pack('<HB', pad, state['cmd']))
             proc.stdin.flush()
             state['cmd'] = 0
             if nframes % 60 == 0:
                 now = time.time()
-                glfw.set_window_title(win, f'FFT native build (GPU {S}x)   frame {frame}   {60 / (now - tf):.0f} fps   GPU {1000 * render_s / nframes:.2f} ms/frame')
+                who = ''
+                if two_seats:
+                    me = 2 if args.join else 1
+                    who = f'   controller {err["who"]} plays now'
+                    if net is not None:
+                        who += f' (you are player {me}' + (', YOUR TURN)' if err['who'] == me else ')')
+                        if net.desync:
+                            who += f'   DESYNC at frame {net.desync[0]}!'
+                glfw.set_window_title(win, f'FFT native build (GPU {S}x)   frame {frame}   {60 / (now - tf):.0f} fps   GPU {1000 * render_s / nframes:.2f} ms/frame' + who)
                 tf = now
             if args.test_frames and nframes >= args.test_frames:
                 dt = time.time() - t0
-                print(f'test: {nframes} frames in {dt:.1f} s ({nframes / dt:.1f} fps), game frame {frame}, GPU replay {1000 * render_s / nframes:.2f} ms/frame')
+                print(f'test: {nframes} frames in {dt:.1f} s ({nframes / dt:.1f} fps), game frame {frame}, GPU replay {1000 * render_s / nframes:.2f} ms/frame'
+                      + (f', two players over the network: desync {net.desync}, state hashes compared equal: {net.checked}' if net is not None else ''))
                 break
     except Exception:                                         # never close silently: say why (and keep it in the log)
         import traceback

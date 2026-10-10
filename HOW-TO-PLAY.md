@@ -34,6 +34,15 @@ starts playing alone and takes the other player into the game in progress when t
     powershell -File "C:\Storage\Build\FFT Mod\port\native\play.ps1" -Join 192.168.1.20:7777
 
 (or `-Join 127.0.0.1:7777` for a second window on the same PC). `-HostPort 7777` instead of `-Invite` waits for the guest and starts together. The title bar text says whose turn it is.
+
+With the graphics-card viewer (`-Gl`): `-Gl -HostPort 7777` / `-Gl -Join HOST:7777` (both start together; joining a game in progress needs the CPU viewer for now),
+and `-Gl -Two` for two players on one computer, controller 2 being the second gamepad. Network games start with an empty memory card on both sides (both copies of the game
+must start from identical memory), so saves are not kept there.
+
+**Gamepads** work in the `-Gl` viewer (controller 1 = keyboard or the first gamepad). The layout is positional like the PlayStation pad: bottom = Cross, right = Circle (confirm), left = Square,
+top = Triangle, bumpers = L1/R1, triggers = L2/R2, Back = Select, Start = Start, d-pad or left stick = directions.
+
+**Texture filter**: `-Gl -Filter` (or T while playing) smooths the game's textures at 2x-4x (EPX, as in the CPU viewer's HD mode).
 Save / load states are disabled while two play. Both players need the same build and their own disc image.
 
 ## Where things are
