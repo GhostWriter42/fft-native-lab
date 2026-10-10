@@ -93,6 +93,8 @@ def main():
     ap.add_argument('--pace', action='store_true', help='limit to 60 frames per second by the clock (for the headless test, where there is no vsync; with sound the audio queue already paces)')
     ap.add_argument('--test-audio', action='store_true', help='with --test-frames: play the sound too (default: muted in the headless test)')
     ap.add_argument('--frame-times', default='', help='diagnostic: write every frame\'s wall time (game + transfer, GPU replay; ms) and trace size to this CSV file')
+    ap.add_argument('--fast-effects', action='store_true', help='ability effects at 60 fps instead of the original 15-30 (run.cfg fasteffects 1)')
+    ap.add_argument('--load-slot', type=int, default=0, metavar='N', help='start from the machine state in slot N (port/build/states/slotN.state; F1..F4 save, F5..F8 load)')
     ap.add_argument('--native-exe', nargs='?', const=str(ROOT / 'build' / 'win' / 'fft_native.exe'), default=None,
                     help='run the Windows build of the game (port/native/win/build_win.py) instead of the container: no Docker needed')
     ap.add_argument('--two', action='store_true', help='two players on this computer: controller 2 is the second gamepad; in battle the units in --seat2 are played with it')
@@ -152,6 +154,12 @@ def main():
             net.send_blob(b'C', 0, cfg_text.encode())
             net.send_blob(b'N', 0, b'')
             print(f'player 2 connected from {addr[0]}: you are player 1')
+    if args.fast_effects and 'fasteffects' not in cfg_text:
+        cfg_text = cfg_text.replace('play 2', 'fasteffects 1\nplay 2')
+    if args.load_slot:                                                          # start from a saved machine state (it must come from this build of the program)
+        if not (STATES / f'slot{args.load_slot}.state').exists():
+            sys.exit(f'there is no state in slot {args.load_slot}')
+        cfg_text = cfg_text.replace('play 2', f'snapload /states/slot{args.load_slot}.state\nplay 2')
     if args.test_frames:                                                        # headless tests never touch the player's memory card
         cfg_text = cfg_text.replace('memcard /states/memcard0.mcr', 'memcard /states/memcard_test.mcr')
     session = ROOT / 'build' / 'session' / name
@@ -353,6 +361,13 @@ def main():
         (ROOT / 'build' / 'native' / 'ls' / 'sessions').mkdir(parents=True, exist_ok=True)
     session_copy = None if args.test_frames else ROOT / 'build' / 'native' / 'ls' / 'sessions' / time.strftime('session_%Y%m%d_%H%M%S.txt')
     inp = {'last': 0, 'hist': [], 'pending_load': None, 'scene_start': None}  # hist: every controller change since POWER-ON as (frame, mask): exact even across state loads
+    if args.load_slot:                                                          # a session started from a state continues that state's input history
+        sj = STATES / f'slot{args.load_slot}.input.json'
+        if sj.exists():
+            import json as json0
+            d0 = json0.loads(sj.read_text(encoding='utf-8'))
+            inp['hist'] = [tuple(e) for e in d0['inputs']]
+            inp['last'] = d0.get('last', 0)
     import json as json_
 
     def write_input_log():                                  # frame:mask,frame:mask,...  (the format of --script / --replay)

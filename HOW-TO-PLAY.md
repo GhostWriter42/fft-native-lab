@@ -4,6 +4,19 @@ What this is: the decomp's C code compiled with a modern compiler, running next 
 It is **not an emulator** and it needs your own disc image in `game\` (already there). It runs inside the Docker toolchain container; a small Python window shows
 the picture, plays the sound and sends your keyboard back. Windows, Docker Desktop running, Python with Pillow and tkinter (already present on this machine).
 
+## The launcher
+
+Double-click **`Play FFT.bat`** in the project folder. A small window lets you choose:
+
+* the program: the Windows build (no Docker) or the Docker build;
+* the picture: resolution 1x-4x, texture filter, smooth window scaling, full screen;
+* the game: fast effects (ability animations at 60 fps instead of the original 15-30), no sound, two players on one PC (the second gamepad);
+* where to start: power-on, or one of the saved states (slot 1-8, with the date and what it is; a state saved by an older build of the program
+  is marked, it will not load);
+
+and has buttons to rebuild the Windows program and to remake the three test states. Your choices are remembered (`port\build\launcher.json`).
+The game's messages appear in a console window next to it.
+
 ## One player
 
     powershell -File "C:\Storage\Build\FFT Mod\port\native\play.ps1"
