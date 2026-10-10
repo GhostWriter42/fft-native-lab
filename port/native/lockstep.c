@@ -662,10 +662,12 @@ static void effectmap_apply(void) {
         }
     }
     if (!ndoc) return;
-    for (i = 0; i < 512; i++) {                                                /* g_battle_effect_ability_ids[ability]: low half = the effect file number */
-        volatile unsigned* p = (volatile unsigned*)(0x801b63f0u + (unsigned)i * 4u);
-        unsigned want = (*p & 0xffff0000u) | docnum[((unsigned)i + g_effectmap) % (unsigned)ndoc];
-        if (*p != want) { *(volatile unsigned*)p = want; if (!g_native_only) *(unsigned*)(interp_ram + (((unsigned)p) & 0x1fffffu)) = want; }
+    for (i = 0; i < 512; i++) {                                                /* s16 g_battle_effect_ability_ids[ability]: < 0 = no effect file; bit 0x800 = item; low bits = the file number */
+        volatile unsigned short* p = (volatile unsigned short*)(0x801b63f0u + (unsigned)i * 2u);
+        unsigned old = *p, want;
+        if (old & 0x8000u) continue;
+        want = (old & 0xf800u) | docnum[((unsigned)i + g_effectmap) % (unsigned)ndoc];
+        if (old != want) { poke8((unsigned)p, want & 0xffu); poke8((unsigned)p + 1u, want >> 8); }
     }
 }
 static void autobattle_apply(void) {
