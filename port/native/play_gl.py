@@ -9,12 +9,15 @@ resolution, which is cheap. Sound goes through Windows audio as in play.py.
   .\port\native\play.ps1 -Gl [-Hd 1..4] [-WorldCheat]                                  (builds when needed; -Hd is the internal resolution factor here, default 2)
 
 Keys:  arrows = d-pad   Z = Cross (cancel)   X = Circle (confirm)   A = Square   S = Triangle (menu)   Q/W = L1/R1   E/R = L2/R2   Enter = Start   Backspace = Select
+       T = texture filter on / off (EPX, at --scale 2 and more)
+       F9 = start / end a SCENE (the controller input from power-on up to here goes to port/scenes/: a replayable regression test, see port/tools/scene.py)
        P = pause   Tab (hold) = fast forward   F1..F4 = save the machine state to slot 1..4   F5..F8 = load slot 1..4   F11 = full screen   F12 = screenshot   Esc = quit
 Title screen: press Enter, then X a few times (the intro movies are skipped).
 """
 import argparse
 import os
 import re
+import shutil
 import struct
 import subprocess
 import sys
@@ -75,6 +78,7 @@ def main():
     ap.add_argument('--cfg', help='a run.cfg for the driver; it must contain `gltrace 1` and end with `play 2` (default: a minimal one)')
     ap.add_argument('--mute', action='store_true')
     ap.add_argument('--fullscreen', action='store_true')
+    ap.add_argument('--filter', choices=['none', 'epx'], default='none', help='texture filter at --scale 2..4: epx = EPX / Scale2x on the game texels (smoother sprites and text); T toggles it')
     ap.add_argument('--smooth', action='store_true', help='bilinear filtering when the picture is scaled to the window')
     ap.add_argument('--script', default='', help='with --test-frames: controller script `frame:mask,frame:mask,...` (a mask holds until the next entry; e.g. 1100:0x800,1106:0) played INSTEAD of the title-to-battle presses')
     ap.add_argument('--replay', default='', help='with --test-frames: replay a logged session (the file written to port/build/native/ls/last_input.txt by an earlier run)')
@@ -162,6 +166,8 @@ def main():
     glfw.swap_interval(1)
     ctx = moderngl.create_context()
     rend = GLRenderer(ctx, S, smooth=args.smooth)
+    filt = {'on': args.filter == 'epx'}
+    rend.set_filter(1 if filt['on'] else 0)
     print(f'GPU: {ctx.info["GL_RENDERER"]}   internal resolution {256 * S}x{240 * S} (x{S})')
 
     state = {'paused': False, 'cmd': 0, 'n': 0, 'fs': False, 'down': set(), 'quit': False}
@@ -179,6 +185,12 @@ def main():
             elif glfw.KEY_F5 <= key <= glfw.KEY_F8:
                 state['cmd'] = 0x11 + key - glfw.KEY_F5
                 print(f'loading state {state["cmd"] - 0x10}')
+            elif key == glfw.KEY_T:
+                filt['on'] = not filt['on']
+                rend.set_filter(1 if filt['on'] else 0)
+                print('texture filter:', 'EPX' if filt['on'] else 'none')
+            elif key == glfw.KEY_F9:
+                state['scene_key'] = True
             elif key == glfw.KEY_F11:
                 if not state['fs']:
                     saved_pos['p'] = glfw.get_window_pos(win) + glfw.get_window_size(win)
@@ -255,7 +267,35 @@ def main():
 
     nframes_box = [0]
     input_path = ROOT / 'build' / 'native' / 'ls' / 'last_input.txt'
-    inp = {'last': 0, 'log': open(input_path, 'w', encoding='ascii')}      # frame:mask,frame:mask,...  (the format of --script)
+    inp = {'last': 0, 'hist': [], 'pending_load': None, 'scene_start': None}  # hist: every controller change since POWER-ON as (frame, mask): exact even across state loads
+    import json as json_
+
+    def write_input_log():                                  # frame:mask,frame:mask,...  (the format of --script / --replay)
+        input_path.write_text(''.join(f'{f}:0x{m:x},' for f, m in inp['hist']), encoding='ascii')
+
+    write_input_log()                                       # (empty: a new session)
+    # the memory card as it was at power-on is part of what a replay needs (Continue / the save screen read it): keep a copy per session
+    inp['card'] = None
+    mc = re.search(r'^memcard /states/(\S+)', cfg_text, re.M)
+    if mc and (STATES / mc.group(1)).exists():
+        cards = STATES / 'cards'
+        cards.mkdir(parents=True, exist_ok=True)
+        inp['card'] = 'cards/' + time.strftime('session-%Y%m%d-%H%M%S.mcr')
+        shutil.copyfile(STATES / mc.group(1), STATES / inp['card'])
+
+    def slot_input_path(slot):
+        return STATES / f'slot{slot}.input.json'
+
+    def save_scene(end_frame):
+        start = inp['scene_start']
+        inp['scene_start'] = None
+        scenes = ROOT / 'scenes'
+        scenes.mkdir(parents=True, exist_ok=True)
+        name = time.strftime('scene-%Y%m%d-%H%M%S')
+        doc = {'name': name, 'description': '', 'start': start, 'end': end_frame, 'card': inp['card'],
+               'inputs': [[f, m] for f, m in inp['hist'] if f <= end_frame], 'shots': {}}
+        (scenes / f'{name}.json').write_text(json_.dumps(doc, indent=1), encoding='utf-8')
+        print(f'scene saved: port/scenes/{name}.json (frames {start}..{end_frame}); give it a name and a description, then: python port/tools/scene.py accept {name}')
     t0 = time.time()
     tf = t0
     next_t = [t0]
@@ -278,6 +318,17 @@ def main():
                     pass
                 break
             frame, ab, tb = struct.unpack('<HHI', hdr[2:10])
+            if inp['pending_load'] is not None:                     # a state was loaded (F5..F8): its input history becomes this session's
+                slot, data = inp['pending_load']
+                inp['pending_load'] = None
+                if data and frame == data['frame'] + 1:
+                    inp['hist'] = [tuple(e) for e in data['inputs']]
+                    inp['last'] = data['last']
+                    inp['card'] = data.get('card')
+                    write_input_log()
+                    print(f'state {slot}: input history restored (power-on to frame {data["frame"]})')
+                elif data is None:
+                    print(f'state {slot}: no input history next to it (saved by an older viewer): scenes recorded from here cannot be replayed')
             trace = read_exact(proc.stdout, tb)
             snd = read_exact(proc.stdout, ab) if ab else None
             if trace is None or (ab and snd is None):
@@ -325,8 +376,20 @@ def main():
             pad = pad_mask()
             if pad != inp['last']:                                  # every change of the controller is logged: the session can be replayed exactly (--script)
                 inp['last'] = pad
-                inp['log'].write(f'{frame}:0x{pad:x},')
-                inp['log'].flush()
+                inp['hist'].append((frame, pad))
+                write_input_log()
+            if state.get('scene_key'):
+                state['scene_key'] = False
+                if inp['scene_start'] is None:
+                    inp['scene_start'] = frame
+                    print(f'scene: recording from frame {frame} (F9 again to end it)')
+                else:
+                    save_scene(frame)
+            if 1 <= state['cmd'] <= 4:                             # saving a state: keep the input history that produced it next to it
+                slot_input_path(state['cmd']).write_text(json_.dumps({'frame': frame, 'last': inp['last'], 'card': inp['card'], 'inputs': inp['hist']}), encoding='utf-8')
+            elif 0x11 <= state['cmd'] <= 0x14:
+                sp = slot_input_path(state['cmd'] - 0x10)
+                inp['pending_load'] = (state['cmd'] - 0x10, json_.loads(sp.read_text(encoding='utf-8')) if sp.exists() else None)
             nframes_box[0] = nframes
             if args.compare or args.record:
                 gl_img = rend.read_display_rgb()
@@ -371,7 +434,8 @@ def main():
         with open(log_path, 'a', encoding='utf-8') as lf:
             lf.write('viewer exception:\n' + tb)
     finally:
-        inp['log'].close()
+        if inp['scene_start'] is not None:
+            save_scene(state['n'])
         print(f'your controller input of this session is in {input_path} (replay it with --script "$(contents)")')
         if args.record:
             dump_record('on exit')

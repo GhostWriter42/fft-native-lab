@@ -39,11 +39,34 @@ uniform usampler2D vram;
 uniform int u_pass;        // 0: every pixel; 1: the pixels that are NOT blended; 2: the blended ones (semi-transparent primitive, texel STP bit set or untextured)
 uniform int u_s;           // internal resolution factor
 uniform int u_abr;         // semi-transparency mode of the draw (0..3); the blend factors of each pixel go to the second output (dual-source blending)
+uniform int u_filter;      // texture filter at u_s > 1: 0 = none (the exact 1x sample of the software model), 1 = EPX / Scale2x on the texels
 in vec3 v_col; in vec2 v_uv;
 flat in uint v_flags; flat in uint v_clut; flat in uint v_tpage; flat in uvec4 v_twin;
 layout(location = 0, index = 0) out vec4 f_color;
 layout(location = 0, index = 1) out vec4 f_blend;   // .rgb = source factor, .a = destination factor
 uint tex16(int x, int y) { return texelFetch(vram, ivec2(x & 1023, y & 511), 0).r; }
+// the 16-bit colour of texel (u, v) of this primitive's page (texture window, 4 / 8 / 15-bit modes); 0 = transparent
+uint texel(int u, int v) {
+    u &= 255; v &= 255;
+    int mx = int(v_twin.x), my = int(v_twin.y), ox = int(v_twin.z), oy = int(v_twin.w);
+    u = (u & ~(mx * 8)) | ((ox & mx) * 8);
+    v = (v & ~(my * 8)) | ((oy & my) * 8);
+    int bx = int(v_tpage & 15u) * 64, by = int((v_tpage >> 4) & 1u) * 256 + v, mode = int((v_tpage >> 7) & 3u);
+    int clx = int(v_clut & 63u) * 16, cly = int(v_clut >> 6);
+    if (mode == 0) { uint w = tex16(bx + (u >> 2), by); return tex16(clx + int((w >> uint((u & 3) * 4)) & 15u), cly); }
+    if (mode == 1) { uint w = tex16(bx + (u >> 1), by); return tex16(clx + int((w >> uint((u & 1) * 8)) & 255u), cly); }
+    return tex16(bx + u, by);
+}
+// EPX / Scale2x: the quarter (qx, qy) of texel P takes a neighbour's colour where two neighbours agree on an edge through it
+uint epx(int u, int v, int qx, int qy) {
+    uint P = texel(u, v), A = texel(u, v - 1), B = texel(u + 1, v), C = texel(u - 1, v), D = texel(u, v + 1);
+    if (A == D || B == C) return P;
+    if (qy == 0 && qx == 0 && C == A) return A;
+    if (qy == 0 && qx == 1 && A == B) return B;
+    if (qy == 1 && qx == 0 && D == C) return C;
+    if (qy == 1 && qx == 1 && B == D) return D;
+    return P;
+}
 void main() {
     bool textured = (v_flags & 1u) != 0u, raw = (v_flags & 2u) != 0u, semi = (v_flags & 4u) != 0u;
     // The software model picks the texel at the integer sample point (x, y) of every VRAM pixel. At u_s > 1 every VRAM pixel is u_s x u_s fragments: evaluate the texture
@@ -55,16 +78,14 @@ void main() {
     ivec3 c5;
     bool blended = semi;
     if (textured) {
-        int u = int(floor(uvp.x + 0.001)) & 255, v = int(floor(uvp.y + 0.001)) & 255;
-        int mx = int(v_twin.x), my = int(v_twin.y), ox = int(v_twin.z), oy = int(v_twin.w);
-        u = (u & ~(mx * 8)) | ((ox & mx) * 8);
-        v = (v & ~(my * 8)) | ((oy & my) * 8);
-        int bx = int(v_tpage & 15u) * 64, by = int((v_tpage >> 4) & 1u) * 256 + v, mode = int((v_tpage >> 7) & 3u);
-        int clx = int(v_clut & 63u) * 16, cly = int(v_clut >> 6);
         uint t;
-        if (mode == 0) { uint w = tex16(bx + (u >> 2), by); t = tex16(clx + int((w >> uint((u & 3) * 4)) & 15u), cly); }
-        else if (mode == 1) { uint w = tex16(bx + (u >> 1), by); t = tex16(clx + int((w >> uint((u & 1) * 8)) & 255u), cly); }
-        else t = tex16(bx + u, by);
+        if (u_filter == 1 && u_s > 1) {                                 // the fragment's own texture position (not snapped to the 1x sample): which quarter of its texel
+            vec2 fu = v_uv + vec2(0.001);
+            vec2 q = fract(fu);
+            t = epx(int(floor(fu.x)), int(floor(fu.y)), q.x >= 0.5 ? 1 : 0, q.y >= 0.5 ? 1 : 0);
+        } else {
+            t = texel(int(floor(uvp.x + 0.001)), int(floor(uvp.y + 0.001)));
+        }
         if (t == 0u) discard;
         blended = semi && (t & 0x8000u) != 0u;
         ivec3 tc = ivec3(int(t & 31u), int((t >> 5) & 31u), int((t >> 10) & 31u));
@@ -148,6 +169,7 @@ class GLRenderer:
         self.prog['u_pass'] = 0
         self.prog['u_abr'] = 0
         self.prog['u_s'] = S
+        self.prog['u_filter'] = 0
         self.vao = ctx.vertex_array(self.prog, [(self.vbo, '2i4 2i2 4u1 2u2 4u1', 'in_pos', 'in_uv', 'in_rgbf', 'in_ct', 'in_twin')])
         self.blit = ctx.program(vertex_shader=FULL_VS, fragment_shader=BLIT_FS)
         self.blit['vram'] = 0
@@ -161,6 +183,10 @@ class GLRenderer:
         self.stats = {'frames': 0, 'tris': 0, 'draws': 0, 'overflow': 0}
 
     # ---------------------------------------------------------------------------------------------------- helpers
+
+    def set_filter(self, mode):
+        """texture filter at scale > 1: 0 = none (the exact 1x texel, what the verification compares), 1 = EPX / Scale2x on the texels"""
+        self.prog['u_filter'] = int(mode)
     def _note_rect(self, r):
         if r not in self.fb_rects:
             self.fb_rects.append(r)
