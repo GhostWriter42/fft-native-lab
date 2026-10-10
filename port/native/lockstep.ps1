@@ -61,7 +61,7 @@ python (Join-Path $PSScriptRoot 'gen_fuzz.py') $repo $nb --native-prefix=native_
 python (Join-Path $PSScriptRoot 'gen_hle.py') $repo (Join-Path $nb 'hle_generated.c') @mods | Out-Host
 $dirs = 'src/main src/battle src/open src/wldcore src/world src/event src/effect src/psyq/libgpu src/psyq/libc src/psyq/libapi src/psyq/libetc src/psyq/libcd src/psyq/libspu src/psyq/libcard src/psyq/libpress src/psyq/suzuki'
 # -finstrument-functions: the replay mode compares the native game's function entries with the original's (the runtime's own files are excluded)
-$gameFlags = '-ftrivial-auto-var-init=zero -fno-omit-frame-pointer -finstrument-functions -finstrument-functions-exclude-file-list=native/rt.c,native/hle/hle.c,native/hle/gpu.c,native/r3000/r3000.c,native/gte/gte.c,native/lockstep.c,native/bios_rt.c,sym_table.c,modules.c'
+$gameFlags = '-ftrivial-auto-var-init=zero -fno-omit-frame-pointer -finstrument-functions -finstrument-functions-exclude-file-list=native/rt.c,native/hle/hle.c,native/hle/gpu.c,native/hle/card.c,native/r3000/r3000.c,native/gte/gte.c,native/lockstep.c,native/bios_rt.c,sym_table.c,modules.c'
 $divfixEnv = ''
 if (-not $NoDivFix) { $divfixEnv = '1' }
 $repHash = (Get-FileHash (Join-Path $PSScriptRoot 'replacements\replaced.txt') -Algorithm MD5).Hash

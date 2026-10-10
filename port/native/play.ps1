@@ -43,7 +43,7 @@ $mode = if ($Verify) { 1 } else { 2 }
 if ($Gl) {                                                     # the graphics card draws: the container sends its GPU command trace, play_gl.py (OpenGL) replays it
     $venvPy = Join-Path (Split-Path $PSScriptRoot -Parent) 'build\venv\Scripts\python.exe'
     if (-not (Test-Path $venvPy)) { Write-Error 'the OpenGL viewer needs the venv: python -m venv port\build\venv ; port\build\venv\Scripts\pip install moderngl glfw numpy pillow'; exit 1 }
-    [System.IO.File]::WriteAllText($cfg, ($text.TrimEnd() + "`naudio 1`ngltrace 1`nplay 2`n"))
+    [System.IO.File]::WriteAllText($cfg, ($text.TrimEnd() + "`naudio 1`nmemcard /states/memcard0.mcr`ngltrace 1`nplay 2`n"))
     $glScale = if ($Hd -ge 1) { $Hd } else { 2 }
     $glArgs = @('--scale', $glScale, '--cfg', $cfg)
     if ($Compare) { $glArgs += '--compare' }
@@ -51,5 +51,5 @@ if ($Gl) {                                                     # the graphics ca
     & $venvPy (Join-Path $PSScriptRoot 'play_gl.py') @glArgs
     exit $LASTEXITCODE
 }
-[System.IO.File]::WriteAllText($cfg, ($text.TrimEnd() + "`naudio 1`nplay $mode`n"))
+[System.IO.File]::WriteAllText($cfg, ($text.TrimEnd() + "`naudio 1`nmemcard /states/memcard0.mcr`nplay $mode`n"))
 python (Join-Path $PSScriptRoot 'play.py') --scale $Scale --cfg $cfg

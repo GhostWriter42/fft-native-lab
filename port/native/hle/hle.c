@@ -2,6 +2,7 @@
 #include "hle.h"
 #include "gpu.h"
 #include "spu.h"
+#include "card.h"
 
 static int streq(const char* a, const char* b) { while (*a && *a == *b) { a++; b++; } return *a == *b; }
 static unsigned bcd(unsigned v) { return (v >> 4) * 10 + (v & 15); }
@@ -366,6 +367,7 @@ unsigned hle_call(hle_t* h, const char* n, unsigned nargs, unsigned a0, unsigned
         for (i = 0; i < HLE_EVENTS; i++) if (h->ev[i].used && h->ev[i].desc == a0 && h->ev[i].spec == a1 && (h->ev[i].enabled || streq(n, "UnDeliverEvent"))) h->ev[i].ready = streq(n, "DeliverEvent");
         return 1;
     }
+    if (h->card) { unsigned r; if (card_hle_call(h, h->card, n, a0, a1, a2, a3, &r)) { log_call(h, n, a0, a1, a2); return r; } }      /* the virtual memory card (card.c) */
     /* Memory cards: a console with NO card inserted. Every card command is accepted and answered with the software-card TIMEOUT event, which is what the BIOS
      * delivers when nothing responds. (0xf4000001 = SwCARD, 0x0100 = EvSpTIMOUT.) */
     if (streq(n, "_card_info") || streq(n, "_card_load") || streq(n, "_card_write") || streq(n, "_card_read") || streq(n, "_new_card")) {

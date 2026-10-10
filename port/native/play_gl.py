@@ -109,7 +109,9 @@ def main():
         if args.compare:
             cfg_text = cfg_text.replace('gltrace 1', 'gltrace 2')
     else:
-        cfg_text = 'frames 0\naudio 1\ngltrace %d\nplay 2\n' % (2 if args.compare else 1)
+        cfg_text = 'frames 0\naudio 1\nmemcard /states/memcard0.mcr\ngltrace %d\nplay 2\n' % (2 if args.compare else 1)
+    if args.test_frames:                                                        # headless tests never touch the player's memory card
+        cfg_text = cfg_text.replace('memcard /states/memcard0.mcr', 'memcard /states/memcard_test.mcr')
     session = ROOT / 'build' / 'session' / name
     session.mkdir(parents=True, exist_ok=True)
     (session / 'run.cfg').write_text(cfg_text)

@@ -16,6 +16,9 @@ Keys: arrows = d-pad, **Z** = Cross (cancel), **X** = Circle (confirm), A = Squa
 P = pause, Tab (held) = fast forward, F12 = screenshot (`port\build\shots`), **F1-F4 save the whole machine state, F5-F8 load it** (save anywhere, also in battle; files in `port\build\states`).
 On the title screen press Enter, then X a few times; the intro movies are skipped.
 
+**Saving in the game** works as on the console: a memory card is in slot 1, kept in `port\build\states\memcard0.mcr` (a standard 128 KiB raw card image, the format
+emulators use). The game's own Save and Continue use it; the F1-F8 machine states do not change it (loading an older state does not undo a save). Slot 2 is empty.
+
 Sound: the music and effects play through Windows audio (`--mute` with `play.py` to switch off). It has not been listened to by the author of this build: if it sounds wrong, the
 numbers in `NATIVE-RUNTIME.md` (Result 7) say what is and is not modelled.
 
