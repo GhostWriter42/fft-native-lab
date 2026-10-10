@@ -70,7 +70,8 @@ def run(name, native, every):
     for p in pts:
         (SHOTS / f'f{p:06d}.png').unlink(missing_ok=True)
     print(f'scene {name}: {doc["end"]} frames ({"native game alone" if native else "lockstep against the original code"}), {len(pts)} checkpoints')
-    r = subprocess.run(['powershell', '-NoProfile', '-File', str(LOCKSTEP), '-NoBuild', '-CfgFile', str(run_cfg)], capture_output=True, text=True, errors='replace')
+    # (a build without the soak harness's -Scenario title shortcut: scenes are recorded in the play build, which boots the game normally)
+    r = subprocess.run(['powershell', '-NoProfile', '-File', str(LOCKSTEP), '-CfgFile', str(run_cfg)], capture_output=True, text=True, errors='replace')
     out = r.stdout + r.stderr
     verdict = [l for l in out.splitlines() if l.startswith('==') or 'DIVERGE' in l or 'differ' in l.lower() or 'CRASH' in l or 'HANG' in l]
     lockstep_ok = native or any('identical at every VSync' in l for l in verdict)

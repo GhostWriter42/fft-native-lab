@@ -33,7 +33,7 @@ if ($Native) {
 }
 if (-not $Native -and ($Build -or $have -ne 'yes')) {
     Write-Host "compiling the native game (a few minutes the first time) ..."
-    & (Join-Path $PSScriptRoot 'lockstep.ps1') -BuildOnly -Scenario title -Gpu | Select-Object -Last 3 | Out-Host
+    & (Join-Path $PSScriptRoot 'lockstep.ps1') -BuildOnly -Gpu | Select-Object -Last 3 | Out-Host      # (no -Scenario title: that test hook skips main_boot_reset_game_state, whose status tables decide when a battle is won)
     if ($LASTEXITCODE -ne 0) { Write-Error 'the build failed'; exit 1 }
 }
 if (($HostPort -or $Invite -or $Join) -and -not $Gl) {

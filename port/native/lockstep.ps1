@@ -24,7 +24,8 @@
 # -Replay N   at frame N run the ORIGINAL first, record its function-call sequence, then run the native game under live comparison: the first different call (or a hang) is reported
 # -Dump N     with -Replay: also print the first N calls of the replayed frame (function, first two arguments)
 # -Where N    at the VSync of frame N print where the original is (function, registers, the return addresses found on its stack)
-# -Scenario title   steer the game past the opening movie (its CD-streaming/MDEC hardware is not modelled) to the title menu
+# -Scenario title   steer the game past the opening movie (its CD-streaming/MDEC hardware is not modelled) to the title menu. A TEST shortcut only: it skips
+#                   main_boot_reset_game_state (the status check tables stay empty: a battle can never be won) -- the play builds do not use it
 # Needs: port\build\portable (run .\port\tools\mktree.ps1 first), extracted disc files (fft_decomp\build\extracted), the raw disc image, Docker.
 # -Peek 'symbol:words,...'   dump memory (interpreter side) at these symbols when the original stops abnormally (with -Replay)
 # -Watch 'g_symbol,g_other+4'   print the value (interpreter side) of these game variables (32-bit words at symbol[+offset]) whenever it changes, per frame; with -Replay the first four

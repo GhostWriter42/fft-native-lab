@@ -39,7 +39,7 @@ BASE_CF = ['-m32', '-mno-ms-bitfields', '-mno-align-double', '-fpcc-struct-retur
            f'-I{NAT / "shim"}', f'-I{NAT / "gte"}', f'-I{PT / "include"}', '-include', 'psx/gte_inline.h']
 GAME_FLAGS = ['-ftrivial-auto-var-init=zero', '-fno-omit-frame-pointer', '-finstrument-functions']
 RT_CF = BASE_CF[:-2] + ['-fno-tree-loop-distribute-patterns', '-fno-omit-frame-pointer', f'-I{NAT}', f'-I{NB}', f'-I{PORT / "build" / "native"}',
-                        '-include', 'psx/gte_inline.h', '-DPC_SCHEME', '-DSCENARIO_TITLE', '-DLOCKSTEP_THREAD_WINDOW', '-DMAX_FRAMES=60', '-DLOG_LIMIT=0'] + GAME_FLAGS + [
+                        '-include', 'psx/gte_inline.h', '-DPC_SCHEME', '-DLOCKSTEP_THREAD_WINDOW', '-DMAX_FRAMES=60', '-DLOG_LIMIT=0'] + GAME_FLAGS + [
           # (as lockstep.ps1's EXTRA_CFLAGS: the thread stacks in the mapped window, the same instrumentation as the container build)
           '-finstrument-functions-exclude-file-list=native/rt.c,native/hle/hle.c,native/hle/gpu.c,native/hle/card.c,native/r3000/r3000.c,native/gte/gte.c,native/lockstep.c,native/bios_rt.c,sym_table.c,modules.c']
 
@@ -97,6 +97,8 @@ def main():
     ap.add_argument('--jobs', type=int, default=6)
     ap.add_argument('--clean', action='store_true')
     ap.add_argument('--no-divfix', action='store_true')
+    ap.add_argument('--scenario-title', action='store_true', help='the soak harness\'s title shortcut (-DSCENARIO_TITLE, as lockstep.ps1 -Scenario title): it skips '
+                    'main_boot_reset_game_state, so never for playing (battles could not be won)')
     ap.add_argument('--watch', action='append', default=[], help='ADDR (hex): a RAM word the replay mode watches (as lockstep.ps1 -Watch)')
     ap.add_argument('--define', action='append', default=[], help='extra -D for the runtime pieces (e.g. REPLAY_FRAME=875: the function-level replay of one frame)')
     a = ap.parse_args()
@@ -195,6 +197,8 @@ def main():
     plain_rt = [NAT / 'gte' / 'gte.c', NAT / 'r3000' / 'r3000.c', NAT / 'hle' / 'hle.c', NAT / 'hle' / 'gpu.c', NAT / 'hle' / 'spu.c', NAT / 'hle' / 'card.c',
                 NB / 'hle_generated.c', NB / 'modules.c', NB / 'sym_table.c', NAT / 'bios_rt.c', NAT / 'lockstep.c', NAT / 'rt.c']
     rt_cf = RT_CF + (['-DDECOMP_HAS_GS_SORTPOLY'] if (PT / 'src' / 'world' / 'world_gs_sortpoly.c').exists() else []) + ['-D' + d for d in a.define]
+    if a.scenario_title:
+        rt_cf.append('-DSCENARIO_TITLE')
     for o in (OUT / 'x').glob('*.o'):
         o.unlink()
 

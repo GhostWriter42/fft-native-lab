@@ -23,13 +23,13 @@ SRC1_COLOR, SRC1_ALPHA = 0x88F9, 0x8589      # GL enums of dual-source blending 
 
 VS = """
 #version 330
-in ivec2 in_pos; in ivec2 in_uv; in uvec4 in_rgbf; in uvec2 in_ct; in uvec4 in_twin;
+in ivec2 in_pos; in ivec2 in_uv; in uvec4 in_rgbf; in uvec2 in_ct; in uvec4 in_twin; in ivec4 in_uvbox;
 out vec3 v_col; out vec2 v_uv;
-flat out uint v_flags; flat out uint v_clut; flat out uint v_tpage; flat out uvec4 v_twin;
+flat out uint v_flags; flat out uint v_clut; flat out uint v_tpage; flat out uvec4 v_twin; flat out ivec4 v_uvbox;
 void main() {
     vec2 p = vec2(in_pos) / 16.0 + 0.5;
     gl_Position = vec4(p.x / 1024.0 * 2.0 - 1.0, p.y / 512.0 * 2.0 - 1.0, 0.0, 1.0);
-    v_col = vec3(in_rgbf.rgb); v_uv = vec2(in_uv); v_flags = in_rgbf.a; v_clut = in_ct.x; v_tpage = in_ct.y; v_twin = in_twin;
+    v_col = vec3(in_rgbf.rgb); v_uv = vec2(in_uv); v_flags = in_rgbf.a; v_clut = in_ct.x; v_tpage = in_ct.y; v_twin = in_twin; v_uvbox = in_uvbox;
 }
 """
 
@@ -41,7 +41,7 @@ uniform int u_s;           // internal resolution factor
 uniform int u_abr;         // semi-transparency mode of the draw (0..3); the blend factors of each pixel go to the second output (dual-source blending)
 uniform int u_filter;      // texture filter at u_s > 1: 0 = none (the exact 1x sample of the software model), 1 = EPX / Scale2x on the texels
 in vec3 v_col; in vec2 v_uv;
-flat in uint v_flags; flat in uint v_clut; flat in uint v_tpage; flat in uvec4 v_twin;
+flat in uint v_flags; flat in uint v_clut; flat in uint v_tpage; flat in uvec4 v_twin; flat in ivec4 v_uvbox;
 layout(location = 0, index = 0) out vec4 f_color;
 layout(location = 0, index = 1) out vec4 f_blend;   // .rgb = source factor, .a = destination factor
 uint tex16(int x, int y) { return texelFetch(vram, ivec2(x & 1023, y & 511), 0).r; }
@@ -74,6 +74,10 @@ void main() {
     vec2 xc = gl_FragCoord.xy / float(u_s);
     vec2 dl = floor(xc) - xc + 0.5;
     vec2 uvp = v_uv + (dFdx(v_uv) * dl.x + dFdy(v_uv) * dl.y) * float(u_s);
+    // At u_s > 1 the edge fragments of a polygon can belong to a VRAM pixel whose sample point lies OUTSIDE the polygon: extrapolated, that texture
+    // position falls on the neighbouring texels of the texture sheet (dark seams along mesh edges). Keep it inside the triangle's own texture
+    // rectangle. (At u_s == 1 every fragment is its own sample point: no change, the verification stays exact.)
+    if (u_s > 1) uvp = clamp(uvp, vec2(v_uvbox.xy), vec2(v_uvbox.zw) - 0.01);
     ivec3 c = ivec3(floor(v_col + 0.001));
     ivec3 c5;
     bool blended = semi;
@@ -164,13 +168,15 @@ class GLRenderer:
         self.fbo = ctx.framebuffer(self.hd_tex)
         self.fbo.clear(0.0, 0.0, 0.0, 1.0)
         self.vbo = ctx.buffer(reserve=24 * 110000, dynamic=True)
+        self.box_vbo = ctx.buffer(reserve=8 * 110000, dynamic=True)        # per vertex: its triangle's texture rectangle (umin, vmin, umax, vmax)
         self.prog = ctx.program(vertex_shader=VS, fragment_shader=FS)
         self.prog['vram'] = 0
         self.prog['u_pass'] = 0
         self.prog['u_abr'] = 0
         self.prog['u_s'] = S
         self.prog['u_filter'] = 0
-        self.vao = ctx.vertex_array(self.prog, [(self.vbo, '2i4 2i2 4u1 2u2 4u1', 'in_pos', 'in_uv', 'in_rgbf', 'in_ct', 'in_twin')])
+        self.vao = ctx.vertex_array(self.prog, [(self.vbo, '2i4 2i2 4u1 2u2 4u1', 'in_pos', 'in_uv', 'in_rgbf', 'in_ct', 'in_twin'),
+                                                (self.box_vbo, '4i2', 'in_uvbox')])
         self.blit = ctx.program(vertex_shader=FULL_VS, fragment_shader=BLIT_FS)
         self.blit['vram'] = 0
         self.blit['u_s'] = S
@@ -240,6 +246,18 @@ class GLRenderer:
         self._vnp = np.frombuffer(verts, VERT) if nv else None
         if nv:
             self.vbo.write(bytes(verts))
+            n3 = nv - nv % 3
+            box = np.zeros((nv, 4), np.int16)
+            if n3:
+                u = self._vnp['u'][:n3].reshape(-1, 3)
+                v = self._vnp['v'][:n3].reshape(-1, 3)
+                box[:n3, 0] = np.repeat(u.min(axis=1), 3)
+                box[:n3, 1] = np.repeat(v.min(axis=1), 3)
+                box[:n3, 2] = np.repeat(u.max(axis=1), 3)
+                box[:n3, 3] = np.repeat(v.max(axis=1), 3)
+            if nv > n3:
+                box[n3:] = (0, 0, 1024, 1024)
+            self.box_vbo.write(box.tobytes())
         for o in ops:
             t = int(o[0])
             if t == 1:
