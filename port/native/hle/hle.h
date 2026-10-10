@@ -63,6 +63,7 @@ typedef struct hle {
     unsigned otdump_n;
     struct spu* spu;                                                            /* optional software SPU (spu.h): when set, the libspu calls drive its voices (audio output) */
     struct gpu* gpu;                                                            /* optional software GPU (gpu.h): when set, the drawing calls render into its VRAM */
+    int fast_effects;                                                           /* set by the driver while the BATTLE overlay is loaded and run.cfg "fasteffects 1": see VSync in hle.c */
     struct mcard* card;                                                         /* optional virtual memory card (card.h) in slot 0; without one, every card call reports no card */
 } hle_t;
 enum { HLE_SYNC_NONE = 0, HLE_SYNC_VSYNC = 1, HLE_SYNC_OVERLAY = 2, HLE_SYNC_DIVERGED = 3 };

@@ -13,10 +13,11 @@
 #   .\port\native\play.ps1 -Invite 7777          start alone; the other player is taken into the game in progress when they connect (you are player 1)
 #   .\port\native\play.ps1 -Join 192.168.1.20:7777   join the other player (you are player 2); -Delay N input delay in frames (default 6)
 #   the host decides the rules: -Seat2 MASK (battle unit slots player 2 plays, default 0x1a) -Hotseat MASK (slots made player-controlled, default 0x1e = the AI allies of the first battle) -RandomBattle
+# -FastEffects  ability effects play at 60 fps (the original paces them at 15-30 fps); an option, off by default
 # -Native  the Windows build of the game instead of the container (no Docker needed; implies -Gl): port\native\win\build_win.py builds
 #          port\build\win\fft_native.exe (needs the i686 GCC in port\build\toolchain, see WINDOWS-NATIVE.md); -Build rebuilds it
 # FFT_LS_VOL selects the docker volume that holds the compiled program (default fft-ls-objs).
-param([int]$Hd = 0, [int]$Scale = 3, [switch]$Build, [switch]$WorldCheat, [switch]$Verify, [int]$HostPort = 0, [int]$Invite = 0, [string]$Join = '', [int]$Delay = 6, [string]$Seat2 = '0x1a', [string]$Hotseat = '0x1e', [switch]$RandomBattle, [switch]$Gl, [switch]$Compare, [switch]$Record, [switch]$Two, [switch]$Filter, [switch]$Native)
+param([int]$Hd = 0, [int]$Scale = 3, [switch]$Build, [switch]$WorldCheat, [switch]$Verify, [int]$HostPort = 0, [int]$Invite = 0, [string]$Join = '', [int]$Delay = 6, [string]$Seat2 = '0x1a', [string]$Hotseat = '0x1e', [switch]$RandomBattle, [switch]$Gl, [switch]$Compare, [switch]$Record, [switch]$Two, [switch]$Filter, [switch]$Native, [switch]$FastEffects)
 . (Join-Path $PSScriptRoot 'padgen.ps1')
 if ($Native) {
     $Gl = $true
@@ -53,6 +54,7 @@ New-Item -ItemType Directory -Force $cfgDir | Out-Null
 $cfg = Join-Path $cfgDir 'play.cfg'
 $cfgHd = if ($Gl) { 0 } else { $Hd }                            # with -Gl the graphics card does the HD drawing: the container must NOT also render HD pictures on the CPU
 $text = New-RunConfig -Frames 0 -PokeWhen $poke -Gpu -Hd $cfgHd
+if ($FastEffects) { $text = $text.TrimEnd() + "`nfasteffects 1`n" }          # ability effects at 60 fps instead of the original 15-30 (not the original game)
 $mode = if ($Verify) { 1 } else { 2 }
 if ($Gl) {                                                     # the graphics card draws: the container sends its GPU command trace, play_gl.py (OpenGL) replays it
     $venvPy = Join-Path (Split-Path $PSScriptRoot -Parent) 'build\venv\Scripts\python.exe'

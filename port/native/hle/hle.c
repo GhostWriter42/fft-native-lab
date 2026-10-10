@@ -257,6 +257,13 @@ unsigned hle_call(hle_t* h, const char* n, unsigned nargs, unsigned a0, unsigned
          * in zero time, so: n blanks); VSync(1) / VSync(-1): report, do not wait. Each blank runs the game's own vertical-blank callback. */
         int mode = (int)a0;
         unsigned frames = mode == 0 ? 1u : (mode >= 2 ? (unsigned)mode : 0u), k;
+        /* Fast effects (an option, not the original): while an ability's effect plays, battle_state_sync_frame paces the battle at 2-4 blanks per frame
+         * (30 / 20 / 15 fps). With the option the battle waits one blank in those two states (g_battle_game_state 0x2d ACTION_EXECUTE, 0x33 EFFECT):
+         * the effects play at 60 fps. Only the number of blanks changes; the music driver still runs on every blank. */
+        if (h->fast_effects && frames > 1) {
+            unsigned st = rd32(h, 0x800960e4u);
+            if (st == 0x2du || st == 0x33u) frames = 1;
+        }
         /* VSync(1) reads the horizontal-blank counter (scanlines since the last vertical blank); the game's AI time-slices itself on it (`VSync(1) >= 0x145`).
          * No machine here runs in real time, so the counter is a function of the call history alone (identical on both machines): one scanline per four queries,
          * restarted at every blank -- an AI pass gets a few hundred queries per frame instead of never (frame counter) or always (a large value). */

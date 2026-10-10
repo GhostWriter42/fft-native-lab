@@ -429,6 +429,7 @@ static unsigned g_seat2_units = 0x0aaaaau;                                      
 static unsigned g_play_pad2;
 static spu_t g_spu_native;                                                      /* the native machine's sound chip model (run.cfg "audio 1") */
 static int g_audio;
+static int g_fast_effects;                                                       /* run.cfg "fasteffects 1" (fast_effects_apply) */
 static char g_memcard[128];                                                    /* run.cfg "memcard PATH": the virtual memory card in slot 0 is kept in this host file (read at start, written when the game changes it) */
 static char g_audiodump[128];                                                   /* run.cfg "audiodump PATH" */
 static unsigned g_autobattle;                                                   /* run.cfg "autobattle MASK": the units in MASK play by the AI (battle_stats.auto_battle_setting = 1): battles without input */
@@ -546,7 +547,7 @@ static void parse_path(const char** pp, char* dst, int max) {
 }
 /* every run-configuration variable back to its default (a state loaded from a snapshot overwrote them with the values of the run that saved it; the configuration is read again after a load) */
 static void cfg_reset(void) {
-    g_frames = MAX_FRAMES; g_npadrt = 0; g_npadrt2 = 0; g_seats = 1; g_seat2_units = 0x0aaaaau; g_hotseat = 0; g_caster = g_caster_seed = 0; g_trace_abil = 0; g_audio = 0; g_audiodump[0] = 0; g_memcard[0] = 0; g_cdtrace = 0; g_effectmap = g_effectmap_on = 0; g_autobattle = 0; g_noframes = 0; g_gltrace = 0; g_gltrace_on = 0; g_npokes = 0;
+    g_frames = MAX_FRAMES; g_npadrt = 0; g_npadrt2 = 0; g_seats = 1; g_seat2_units = 0x0aaaaau; g_hotseat = 0; g_caster = g_caster_seed = 0; g_trace_abil = 0; g_audio = 0; g_audiodump[0] = 0; g_memcard[0] = 0; g_fast_effects = 0; g_cdtrace = 0; g_effectmap = g_effectmap_on = 0; g_autobattle = 0; g_noframes = 0; g_gltrace = 0; g_gltrace_on = 0; g_npokes = 0;
     g_natwatch = 0; g_natwatch_from = 1;
     g_gpu_on = 0; g_shotscale = 1; g_gpu_watch = 0;
     g_texdump_n = 0; g_nskipcmd = 0; g_play = 0; g_native_only = 0; g_hd_s = 0; g_hd_filter = 1; g_polydump = 0;
@@ -586,6 +587,7 @@ static void load_run_config(void) {
         else if (p[0] == 'n' && p[1] == 'a') { p += 8; g_natwatch = parse_num(&p); g_natwatch_from = parse_num(&p); if (!g_natwatch_from) g_natwatch_from = 1; }     /* natwatch ADDR [FROM] */
         else if (p[0] == 'g' && p[1] == 'l' && p[2] == 't') { p += 7; g_gltrace = (int)parse_num(&p); g_gltrace_on = g_gltrace; g_gl_full = 1; }                                    /* gltrace 1 */
         else if (p[0] == 'n' && p[1] == 'o') { p += 8; g_noframes = (int)parse_num(&p); }                                                                                                  /* noframes 1 */
+        else if (p[0] == 'f' && p[1] == 'a' && p[2] == 's') { p += 11; g_fast_effects = (int)parse_num(&p); }                                                                   /* fasteffects 1 */
         else if (p[0] == 'm' && p[1] == 'e' && p[2] == 'm' && p[3] == 'c') { p += 7; parse_path(&p, g_memcard, (int)sizeof g_memcard); }                                                                    /* memcard PATH */
         else if (p[0] == 'a' && p[1] == 'u' && p[2] == 'd' && p[5] == 'd') { p += 9; parse_path(&p, g_audiodump, (int)sizeof g_audiodump); g_audio = 1; }                                       /* audiodump PATH */
         else if (p[0] == 'a' && p[1] == 'u' && p[2] == 'd') { p += 5; g_audio = (int)parse_num(&p); }                                                                                   /* audio N */
@@ -679,6 +681,14 @@ static void effectmap_apply(void) {
         want = (old & 0xf800u) | docnum[((unsigned)i + g_effectmap) % (unsigned)ndoc];
         if (old != want) { poke8((unsigned)p, want & 0xffu); poke8((unsigned)p + 1u, want >> 8); }
     }
+}
+/* run.cfg "fasteffects 1": ability effects play at 60 fps instead of the original 15-30 (hle.c, VSync); the flag is live only while BATTLE is loaded */
+static hle_t hle_i;                                                              /* (tentative definitions: the machines are defined further down) */
+extern hle_t g_hle_native;
+static void fast_effects_apply(void) {
+    int on = g_fast_effects && module_active("battle");
+    g_hle_native.fast_effects = on;
+    hle_i.fast_effects = on;
 }
 static void autobattle_apply(void) {
     int i;
@@ -1859,6 +1869,7 @@ static int main_test(void) {
         g_cur_frame = frame;
         hotseat_apply();
         caster_apply();
+        fast_effects_apply();
         autobattle_apply();
         effectmap_apply();
         trace_abilities(frame);
