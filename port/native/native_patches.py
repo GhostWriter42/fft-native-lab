@@ -399,4 +399,74 @@ dict(
         new='        g_main_special_portrait_unit_id = scenario->unit_id;\n        return scenario->unit_id;',
         why='retail: $v0 = the unit id byte just stored (lbu $v0,0xe($s1) at 0x801c35c4).',
     ),
+    dict(
+        file='src/battle/battle_noop_801b2968.c',
+        old='void battle_noop_801b2968(void) {\n}',
+        new='int battle_noop_801b2968(void) {\n    return (int)battle_noop_801b2968;\n}',
+        why='an entry of g_battle_effect_secondary_handlers, whose result battle_effect_update_secondary_effects tests (0 removes the '
+            'effect). Retail calls it with jalr $v0, so the empty function returns its own address: nonzero, the effect stays.',
+    ),
+    dict(
+        file='src/battle/battle_noop_801b2bfc.c',
+        old='void battle_noop_801b2bfc(void) {\n}',
+        new='int battle_noop_801b2bfc(void) {\n    return (int)battle_noop_801b2bfc;\n}',
+        why='see battle_noop_801b2968.c.',
+    ),
+    dict(
+        file='src/battle/battle_noop_801b2c04.c',
+        old='void battle_noop_801b2c04(void) {\n}',
+        new='int battle_noop_801b2c04(void) {\n    return (int)battle_noop_801b2c04;\n}',
+        why='see battle_noop_801b2968.c.',
+    ),
+    dict(
+        file='src/battle/battle_noop_801b2e60.c',
+        old='void battle_noop_801b2e60(void) {\n}',
+        new='int battle_noop_801b2e60(void) {\n    return (int)battle_noop_801b2e60;\n}',
+        why='see battle_noop_801b2968.c.',
+    ),
+    dict(
+        file='src/battle/battle_noop_801b3118.c',
+        old='void battle_noop_801b3118(void) {\n}',
+        new='int battle_noop_801b3118(void) {\n    return (int)battle_noop_801b3118;\n}',
+        why='see battle_noop_801b2968.c.',
+    ),
+    dict(
+        file='src/main/main_smd_modulator_deactivate.c',
+        old='void main_smd_modulator_deactivate(suzuki_modulator_t* modulator) {\n    modulator->flags &= ~1;\n}',
+        new='s32 main_smd_modulator_deactivate(suzuki_modulator_t* modulator) {\n    modulator->flags &= ~1;\n    return (u16)modulator->flags;\n}',
+        why='waveforms 8-15 of g_main_smd_modulator_waveforms; main_smd_update_modulators adds the step result (>> 16) to the channel\'s pitch '
+            'or volume modulation. Retail leaves the new 16-bit flags in $v0 (lhu/andi at 0x80017634), which shifts to 0; natively eax could add '
+            'a stray offset.',
+    ),
+    dict(
+        file='include/fft/main.h',
+        old='void main_smd_modulator_deactivate(suzuki_modulator_t* modulator);',
+        new='s32 main_smd_modulator_deactivate(suzuki_modulator_t* modulator);',
+        why='the declaration of the patch above.',
+    ),
+    dict(
+        file='src/battle/battle_text_determine_spell_quote.c',
+        old='void battle_text_determine_spell_quote(world_unit_command_action_t* action, s32 unit_id, s32 enabled) {',
+        new='s32 battle_text_determine_spell_quote(world_unit_command_action_t* action, s32 unit_id, s32 enabled) {',
+        why='battle_menu_init_system_function returns this void function\'s $v0. Every retail path ends in one shared jal to '
+            'battle_menu_dispatch_system_function (0x80141990) followed by the epilogue, so $v0 is the dispatch result: return it.',
+    ),
+    dict(
+        file='src/battle/battle_text_determine_spell_quote.c',
+        old='        battle_menu_dispatch_system_function(\n            BATTLE_MENU_SYSTEM_COMMAND_SPELL_QUOTE, 0, unit_id, 0, enabled, (battle_ai_command_action_t*)action);\n        return;',
+        new='        return battle_menu_dispatch_system_function(\n            BATTLE_MENU_SYSTEM_COMMAND_SPELL_QUOTE, 0, unit_id, 0, enabled, (battle_ai_command_action_t*)action);',
+        why='see above.',
+    ),
+    dict(
+        file='src/battle/battle_text_determine_spell_quote.c',
+        old='        battle_menu_dispatch_system_function(BATTLE_MENU_SYSTEM_COMMAND_ABILITY_ANNOUNCEMENT, 0, unit_id, 0, enabled,',
+        new='        return battle_menu_dispatch_system_function(BATTLE_MENU_SYSTEM_COMMAND_ABILITY_ANNOUNCEMENT, 0, unit_id, 0, enabled,',
+        why='see above.',
+    ),
+    dict(
+        file='src/battle/battle_text_determine_spell_quote.c',
+        old='        battle_menu_dispatch_system_function(\n            BATTLE_MENU_SYSTEM_COMMAND_ABILITY_ANNOUNCEMENT, 0, unit_id, 0, 0,',
+        new='        return battle_menu_dispatch_system_function(\n            BATTLE_MENU_SYSTEM_COMMAND_ABILITY_ANNOUNCEMENT, 0, unit_id, 0, 0,',
+        why='see above.',
+    ),
 ]

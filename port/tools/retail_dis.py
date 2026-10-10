@@ -49,7 +49,7 @@ def main():
                 continue
             addr, size = int(m.group(1), 16), int(m.group(2))
             data = (FILES / fname).read_bytes()
-            off = addr - load + (0x800 if fname == 'SCUS_942.21' else 0)     # the main executable has a 2 KiB PS-X EXE header
+            off = addr - load                                                   # (the main executable's load, 0x8000f800, already covers its 2 KiB PS-X EXE header)
             print(f'== {name} ({fname}, 0x{addr:08x}, {size} bytes)')
             for ins in md.disasm(data[off:off + size], addr):
                 ops = ins.op_str

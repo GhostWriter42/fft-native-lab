@@ -30,6 +30,15 @@ NB = PORT / 'build' / 'native' / 'ls'
 OUT = PORT / 'build' / 'win'
 TOOLS = PORT / 'build' / 'toolchain' / 'mingw32' / 'bin'
 GCC, NM, OBJCOPY = str(TOOLS / 'gcc.exe'), str(TOOLS / 'nm.exe'), str(TOOLS / 'objcopy.exe')
+EXPECTED_FAILURES = {                       # game sources that are MIPS asm the native compiler cannot build; anything else failing stops the build
+    'src/battle/battle_copy_bytes.c', 'src/battle/battle_find_text_id_location.c', 'src/battle/battle_thread_get_current_global_pointer.c',
+    'src/battle/battle_thread_get_current_parameter_1.c', 'src/battle/battle_thread_get_current_parameter_2.c',
+    'src/battle/battle_thread_get_current_parameter_3.c', 'src/battle/battle_thread_is_previous_running.c',
+    'src/battle/battle_thread_is_running_8014cc94.c',                                  # (native versions: replacements/battle_asm.c)
+    'src/psyq/libcard/_patch_card.c', 'src/psyq/libcard/_patch_card2.c', 'src/psyq/libcard/psyq_card_long_delay.c',
+    'src/psyq/libcard/psyq_card_restore_exception_prefix.c', 'src/psyq/libcard/psyq_card_short_delay.c',   # (the platform layer's card, hle/card.c)
+    'src/psyq/libpress/DecDCTvlc.c', 'src/psyq/libpress/DecDCTvlcSize.c',
+}
 MODS = ['main.yaml', 'battle.yaml', 'opening.yaml', 'wldcore.yaml', 'world.yaml', 'event.yaml', 'effect.yaml']
 DIRS = ['src/main', 'src/battle', 'src/open', 'src/wldcore', 'src/world', 'src/event', 'src/effect', 'src/psyq/libgpu', 'src/psyq/libc', 'src/psyq/libapi',
         'src/psyq/libetc', 'src/psyq/libcd', 'src/psyq/libspu', 'src/psyq/libcard', 'src/psyq/libpress', 'src/psyq/suzuki']
@@ -188,6 +197,9 @@ def main():
     print(f'compiled: {len(srcs) - len(failed)}, failed: {len(failed)}')
     for rel, err in failed[:20]:
         print('  ', rel, (err.strip().splitlines() or [''])[0][:150])
+    unexpected = [rel for rel, _ in failed if rel not in EXPECTED_FAILURES]
+    if unexpected:      # a game function that does not compile would otherwise be stubbed (returning 0) without a word
+        sys.exit(f'{len(unexpected)} game sources failed to compile (not in EXPECTED_FAILURES): ' + ', '.join(unexpected[:10]))
 
     # 3. the runtime pieces
     p_gte = PT / 'src' / 'psyq' / 'libgte'
