@@ -279,4 +279,63 @@ PATCHES = [
         new='    /* retail leaves a2 alone, so the wrapped-selection routine receives this function\'s own input_mask (disassembly 0x801c9818: no write to a2 before the jal) */\n    selection = equip_menu_update_wrapped_horizontal_selection(entry_count & 0xFFFF, index, input_mask);',
         why='twin of equip_menu_update_vertical_selection_and_mark_change.c.',
     ),
+dict(
+        file='include/fft/world.h',
+        old='void world_menu_handle_window_command_with_scaled_clip(world_menu_window_command_t* command);',
+        new='world_menu_window_command_t* world_menu_handle_window_command_with_scaled_clip(world_menu_window_command_t* command);',
+        why='see the next entry: the native definition returns the next command.',
+    ),
+    dict(
+        file='src/world/world_menu_handle_window_command_with_scaled_clip.c',
+        old='void world_menu_handle_window_command_with_scaled_clip(world_menu_window_command_t* command) {',
+        new='world_menu_window_command_t* world_menu_handle_window_command_with_scaled_clip(world_menu_window_command_t* command) {',
+        why='menu-script opcode 0x12 handler (g_world_menu_script_handlers): the script loop takes the handler\'s return value as the next command, but the '
+            'decomp declares it void; retail returns whatever world_menu_parse_draw_window_frame left in $v0 (the next command). Natively that only '
+            'worked while GCC happened to leave the callee\'s eax alone (the Windows build clobbers it around the instrumentation hook and crashes in the '
+            'name-entry screen). Return it explicitly.',
+    ),
+    dict(
+        file='src/world/world_menu_handle_window_command_with_scaled_clip.c',
+        old='    world_menu_parse_draw_window_frame(command);\n}',
+        new='    return world_menu_parse_draw_window_frame(command);\n}',
+        why='see the previous entry.',
+    ),
+    dict(
+        files=['src/battle/battle_move_has_reached_current_tile_exit_edge.c', 'src/battle/battle_move_has_reached_destination_tile_entry_edge.c',
+               'src/battle/battle_move_has_reached_destination_tile_center.c'],
+        old='    }\n}',
+        new='    }\n    return direction < 2 ? 1 : 3;\n}',
+        why='a direction outside 0..3 falls off the end of the switch. Retail (0x8006cbb8 and twins: `ori v0,1; beq a0,v0; slti v0,a0,2; beqz v0; ...; '
+            'ori v0,3; beq a0,v0; j end`) leaves 1 in $v0 for a negative direction and 3 for 4 or more: "reached". Natively the value was whatever eax '
+            'held; the Windows build got 0 and a walking unit of the opening scene never arrived. Return the retail value.',
+    ),
+    dict(
+        file='src/battle/battle_move_calculate_walkto_pathing.c',
+        old='    battle_move_calculate_pathing(flags, jump, x, y, level, target_x, target_y, target_level, 1, &suspended, 0);\n}',
+        new='    return (battle_walk_path_t*)battle_move_calculate_pathing(flags, jump, x, y, level, target_x, target_y, target_level, 1, &suspended, 0);\n}',
+        why='falls off its end; retail returns the route buffer battle_move_calculate_pathing left in $v0 (the decomp says so), and '
+            'battle_move_start_unit_walk_to copies 0x7c bytes from it into the unit. Natively the value was whatever eax held: the Windows '
+            'build copied native code into the unit record (frame 3191 of a soak). Return it explicitly.',
+    ),
+    dict(
+        file='src/battle/battle_map_load_gns_and_move_find_items.c',
+        old='    /* The target falls through with the BIOS bzero result still in v0. */\n}',
+        new='    /* The target falls through with the BIOS bzero result still in v0: bzero returns its destination. */\n    return gns_records;\n}',
+        why='a map without a GNS file falls off the end; retail returns what bzero left in $v0, its destination (BIOS A(28h)), which the caller '
+            'compares with g_battle_map_gns_records. Return it explicitly.',
+    ),
+    dict(
+        file='src/battle/battle_map_command_get_3d_object_state.c',
+        old='void battle_map_command_get_3d_object_state(s32 value) {\n    battle_map_dispatch_map_data_command(',
+        new='s32 battle_map_command_get_3d_object_state(s32 value) {\n    return battle_map_dispatch_map_data_command(',
+        why='a "get" wrapper the decomp declares void; battle_script_process_pending_requests stores its result (it sees no prototype, so C89 '
+            'assumes int). Retail returns what the dispatcher left in $v0: its return value. Natively that was whatever eax held (the Windows '
+            'build stored 0x5ac in g_battle_field_object_wait_status at frame 5028 of the owner\'s session). Return it explicitly.',
+    ),
+    dict(
+        file='src/battle/battle_map_command_get_texture_animation_active.c',
+        old='void battle_map_command_get_texture_animation_active(s32 value) {\n    battle_map_dispatch_map_data_command(',
+        new='s32 battle_map_command_get_texture_animation_active(s32 value) {\n    return battle_map_dispatch_map_data_command(',
+        why='twin of battle_map_command_get_3d_object_state.c.',
+    ),
 ]

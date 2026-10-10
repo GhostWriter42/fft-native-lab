@@ -1,33 +1,45 @@
-# A Windows-native build (no Docker): plan
+# The Windows build (no Docker)
 
-Status (2026-10-09): **not started**. The native game runs only inside the Linux toolchain container today. This note says what a Windows build needs, so the work can be
-picked up in one piece.
+Status (2026-10-10): **works.** `port/build/win/fft_native.exe` is the native game built for Windows. It plays the owner's first session (power-on, title,
+name entry, the opening, the whole first battle: 31,000 frames) **identical to the original machine code at every frame**: the program carries the
+same R3000 interpreter as the container build and runs the original next to itself when asked (lockstep). In the GPU viewer it runs at about
+260 frames per second, so the 60 fps game uses a fraction of one core and no virtual machine.
 
-## What is portable already
+    powershell -File port\native\play.ps1 -Native -Hd 2          # play: the graphics card draws, no Docker
 
-* The game itself: the decomp's C, as portified (`port/tools/portify.py` + the 34 reviewed patches), is plain C with no OS calls.
-* The platform layer (`port/native/hle/*.c`: SDK calls, software GPU, SPU model, memory card) and the software GTE: freestanding C.
-* The GPU viewer (`play_gl.py`, OpenGL) and the sound output already run on Windows. They talk to the game over a pipe (GPU command trace + audio out, controllers in),
-  so a Windows build of the game can keep that interface unchanged.
+## What it is
 
-## What is Linux-specific
+* The game: the same portified decomp tree and the same reviewed native patches as the container build, compiled by an i686 MinGW-w64 GCC 12.4
+  (WinLibs; `port/build/toolchain`, not in the repository) with the container's flags plus three that give the Linux i386 ABI:
+  `-mno-ms-bitfields -mno-align-double` (struct layout) and `-fpcc-struct-return` (small structs returned in memory).
+* The driver (`port/native/lockstep.c`): unchanged apart from a few `_WIN32` switches. Its Linux system calls go to `port/native/win/win_sys.c`,
+  which does them with Win32: file I/O through the container's mount names (the environment variable `FFT_MOUNTS` maps `/disc`, `/states`, ... to
+  Windows folders), `mmap` / `mprotect` as `VirtualAlloc` / `VirtualProtect` (the PS1 RAM at 0x80000000 needs a large-address-aware 32-bit process),
+  signals as a vectored exception handler.
+* `port/native/win/build_win.py`: the container's build steps (generated tables, compile, rename to `native_*`, per-overlay data copies, stubs, link
+  with the symbol script). Objects are reused while their source text, the headers and the flags are unchanged: a full build takes about an hour, a
+  patch to a few sources a few minutes.
+* `play_gl.py --native-exe` / `play.ps1 -Native`: the GPU viewer starts the Windows program instead of `docker run`; the pipe protocol is the same.
 
-1. **The driver** (`port/native/lockstep.c`): system calls through `int $0x80` (49 call sites: file I/O, `mmap` at fixed addresses, signals, `mprotect`), the start-up code,
-   and the comparison with the R3000 interpreter. A Windows build needs only the *play* half: boot, frame loop, pipe protocol, save states, memory card. No oracle.
-2. **The address-space layout**: the PS1 RAM is mapped at its own addresses (0x80000000..0x801fffff), the scratchpad at 0x1f800000, the thread and main stacks at
-   0x80400000..0x80a00000, the trampolines at 0x10000000. A 32-bit process on 64-bit Windows linked with `/LARGEADDRESSAWARE` has a 4 GiB address space, so
-   `VirtualAlloc(fixed address, MEM_RESERVE | MEM_COMMIT)` can place all of these. To be verified first: nothing (ASLR images, the heap, the stack) already occupies them.
-3. **Page zero**: retail code reads console RAM at addresses 0..0xffff (through NULL pointers). Linux maps a zero page there (`--cap-add SYS_RAWIO`); Windows cannot.
-   Each such read needs a reviewed source patch. The lockstep's NULL-page report lists the sites (currently `battle_map_calculate_slope_height+89`).
-4. **Thread switching** (`replacements/battle_thread.c`, `world_thread.c`): hand-written stack switching in x86 assembly (cdecl, no OS calls). It should assemble unchanged with
-   an i686 GNU toolchain, but needs testing.
-5. **Toolchain**: an i686 MinGW-w64 GCC (the same compiler family and flags as the container: `-m32 -O1 -fno-strict-aliasing -fwrapv -fno-delete-null-pointer-checks ...`).
-   This is a download (approved class: project tooling).
+## What the port had to fix (and what that fixed for Linux too)
 
-## Order of work
+Windows exposed places where the native build had matched the original only by luck. The values involved come from undefined behaviour in the
+retail code, and Linux GCC happened to produce the retail values:
 
-1. Install i686 MinGW-w64; compile the portified tree + platform layer into objects on Windows (no linking yet). This shows compiler differences early.
-2. Write `port/native/win_main.c`: map the fixed regions, load the game image, run the frame loop with the pipe protocol of `play 2` / `gltrace 1`.
-3. Patch the page-zero reads (soak in the container first with page zero unmapped to find them all: a run.cfg switch that skips the `SYS_RAWIO` mapping).
-4. Point `play_gl.py` at the Windows executable instead of `docker run` (`--native-exe PATH`).
-5. Check: the scenes (`port/tools/scene.py run ... --native`) give the same pictures on Windows as in the container.
+* **Functions that fall off their end or are declared `void` while callers use their value**; on the PS1 the caller gets whatever is in `$v0`,
+  natively whatever is in `eax`. Fixed with reviewed patches that return the retail value explicitly (read from the machine code):
+  the menu-script handler `world_menu_handle_window_command_with_scaled_clip`, `battle_move_has_reached_*` (3), `battle_move_calculate_walkto_pathing`,
+  `battle_map_load_gns_and_move_find_items`, `battle_map_command_get_3d_object_state` / `..._get_texture_animation_active`.
+  `port/tools/void_ret_scan.py` and `port/tools/void_table_scan.py` list the remaining candidates.
+* **Dead stack memory**: the name-entry screen keeps its GPU packet buffers in its stack frame after it returns; a Linux system call does not touch
+  the caller's stack, a Win32 call does. `win_sys.c` therefore runs every call on a stack of its own.
+* **Page zero**: retail code reads console RAM at 0..0xffff through NULL pointers; Linux maps a zero page there, Windows cannot. `win_sys.c` emulates
+  those loads (as 0), compares and tests in its exception handler and reports every site once (each deserves a patch).
+* **Build flags the container passes** (`-DLOCKSTEP_THREAD_WINDOW`: the game's thread stacks in the mapped window, which PS1-style 24-bit GPU links need).
+
+## Not done yet
+
+* The CPU viewer (`play.py`) and the two-player join of a game in progress still use the container.
+* The Windows program needs the extracted disc files and the disc image as the container does (`HOW-TO-PLAY.md`).
+* Remaining return-hazard functions (`battle_script_filter_unit_id_by_mode`, `battle_target_set_weapon_attack_panels`, `battle_action_can_unit_react_1`):
+  their retail values are still to be derived; until then the Windows and Linux builds may differ where they matter.

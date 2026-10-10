@@ -32,6 +32,15 @@
 #endif
 
 /* ---------------------------------------------------------------------------------------- freestanding I/O */
+/* assembly that names a C symbol: Win32 (i686 PE) prefixes C names with '_', Linux ELF does not */
+#define LS_STR2(x) #x
+#define LS_STR(x) LS_STR2(x)
+#define ASYM(name) LS_STR(__USER_LABEL_PREFIX__) #name
+#ifdef _WIN32
+long win_sys(long n, long a, long b, long c, long d);                          /* win/win_sys.c: the same Linux system calls, on Win32 */
+static long sys3(long n, long a, long b, long c) { return win_sys(n, a, b, c, 0); }
+static long sys4(long n, long a, long b, long c, long d) { return win_sys(n, a, b, c, d); }
+#else
 static long sys3(long n, long a, long b, long c) {
     long r;
     __asm__ volatile("int $0x80" : "=a"(r) : "0"(n), "b"(a), "c"(b), "d"(c) : "memory");
@@ -42,6 +51,7 @@ static long sys4(long n, long a, long b, long c, long d) {
     __asm__ volatile("int $0x80" : "=a"(r) : "0"(n), "b"(a), "c"(b), "d"(c), "S"(d) : "memory");
     return r;
 }
+#endif
 static int g_out_fd = 1;                                                     /* play mode: stdout carries the frames, the log goes to stderr */
 static void out(const char* s) { long n = 0; while (s[n]) n++; sys3(4, g_out_fd, (long)s, n); }
 static void outnum(long v) {
@@ -843,8 +853,8 @@ void* g_game_esp;
 static int g_native_dead;
 void ls_switch(void** save_esp, void* new_esp);
 __asm__(".text\n"
-        ".globl ls_switch\n"
-        "ls_switch:\n"
+        ".globl " ASYM(ls_switch) "\n"
+        ASYM(ls_switch) ":\n"
         "    movl 4(%esp), %eax\n"
         "    movl 8(%esp), %edx\n"
         "    pushl %ebp\n"
@@ -862,14 +872,14 @@ __asm__(".text\n"
  * slot on the game's stack, i.e. in memory that the state hash and the snapshots cover; this stub takes both values from the globals itself */
 void ls_yield(void);
 __asm__(".text\n"
-        ".globl ls_yield\n"
-        "ls_yield:\n"
+        ".globl " ASYM(ls_yield) "\n"
+        ASYM(ls_yield) ":\n"
         "    pushl %ebp\n"
         "    pushl %ebx\n"
         "    pushl %esi\n"
         "    pushl %edi\n"
-        "    movl %esp, g_game_esp\n"
-        "    movl g_driver_esp, %esp\n"
+        "    movl %esp, " ASYM(g_game_esp) "\n"
+        "    movl " ASYM(g_driver_esp) ", %esp\n"
         "    popl %edi\n"
         "    popl %esi\n"
         "    popl %ebx\n"
@@ -915,12 +925,19 @@ struct ksigaction { void (*handler)(int, void*, void*); unsigned long flags; voi
 static int g_null_page_mapped, g_null_page_open;
 static unsigned g_null_sites[64];
 static int g_n_null_sites;
+#ifdef _WIN32
+static void ls_sig_restorer_w(void) {}
+#define ls_sig_restorer ls_sig_restorer_w
+#else
 __asm__(".text\n"
         ".globl ls_sig_restorer\n"
         "ls_sig_restorer:\n"
         "    movl $173, %eax\n"                                      /* rt_sigreturn */
         "    int $0x80\n");
+#endif
+#ifndef _WIN32
 extern void ls_sig_restorer(void);
+#endif
 static void null_page_close(void) { if (g_null_page_mapped && g_null_page_open) { sys3(125, 0, NULL_PAGE_BYTES, 0); g_null_page_open = 0; } }   /* mprotect(PROT_NONE) */
 static void report_null_sites(void) {
     int i;
@@ -1103,6 +1120,19 @@ void __attribute__((no_instrument_function)) __cyg_profile_func_enter(void* fn, 
     int k;
     unsigned ps1;
     (void)site;
+#ifdef NATIVE_CALLTRACE_FROM
+    {   /* debugging aid (-DNATIVE_CALLTRACE_FROM=F): every native game-function entry from frame F on (up to 4000 lines), to compare two builds of the native game */
+        static int built_frame = -1, count;
+        if (g_cur_frame >= NATIVE_CALLTRACE_FROM && count < 4000) {
+            if (built_frame != g_cur_frame) { build_event_tables(); built_frame = g_cur_frame; }
+            k = find_key(nat_key, n_nat, (unsigned)fn);
+            if (k >= 0) {                                                        /* the function's first two arguments, from its frame (built with frame pointers) */
+                const unsigned* args = (const unsigned*)((const char*)__builtin_frame_address(1) + 8);
+                count++; out("CT f"); outnum(g_cur_frame); out(" "); func_at(nat_val[k]); out(" a0="); outhex(args[0]); out(" a1="); outhex(args[1]); out("\n");
+            }
+        }
+    }
+#endif
     if (g_trace_on != 2) return;
     if (g_ls_ignore_enter) { g_ls_ignore_enter = 0; return; }
     k = find_key(nat_key, n_nat, (unsigned)fn);
@@ -1240,7 +1270,7 @@ static const struct hle_otdump* otdump_of(const hle_t* h, unsigned idx) {
 static void print_otdump_diff(unsigned idx) {
     const struct hle_otdump* dn = otdump_of(&g_hle_native, idx);
     const struct hle_otdump* dy = otdump_of(&hle_i, idx);
-    unsigned pn = 0, py = 0, np = 0, k;
+    unsigned pn = 0, py = 0, np = 0, k, prev_n = 0, prev_y = 0;
     if (!dn || !dy) { out("    (no packet dump kept for this call)\n"); return; }
     while (pn < dn->n && py < dy->n) {
         unsigned ln = dn->w[pn + 1], ly = dy->w[py + 1], same = ln == ly;
@@ -1251,9 +1281,16 @@ static void print_otdump_diff(unsigned idx) {
             out("\n      original at 0x"); outhex(dy->w[py]); out(" len "); outnum(ly); out(":");
             for (k = 0; k < ly; k++) { out(" "); outhex(dy->w[py + 2 + k]); }
             out("\n");
-            if (np) { out("      the packet before (native) at 0x"); outhex(dn->w[pn - 0]); out("\n"); }
+            if (np) {                                                         /* the packet before holds the link that leads here */
+                out("      the packet before: native at 0x"); outhex(dn->w[prev_n]); out(" len "); outnum(dn->w[prev_n + 1]); out(":");
+                for (k = 0; k < dn->w[prev_n + 1] && k < 16; k++) { out(" "); outhex(dn->w[prev_n + 2 + k]); }
+                out("\n                         original at 0x"); outhex(dy->w[prev_y]); out(" len "); outnum(dy->w[prev_y + 1]); out(":");
+                for (k = 0; k < dy->w[prev_y + 1] && k < 16; k++) { out(" "); outhex(dy->w[prev_y + 2 + k]); }
+                out("\n");
+            }
             return;
         }
+        prev_n = pn; prev_y = py;
         pn += 2 + ln; py += 2 + ly; np++;
     }
     out("    the packets are the same for the first "); outnum(np); out(" (native has "); out(pn < dn->n ? "more" : "no more"); out(", original has "); out(py < dy->n ? "more" : "no more"); out(")\n");
@@ -1539,10 +1576,18 @@ union snap_ctl { struct snap_ctl_f f; unsigned char raw[8192]; };
 static union snap_ctl g_snapctl_u __attribute__((aligned(4096)));                /* two whole pages of their own: the only part of the image a load must not overwrite */
 #define g_snapctl (g_snapctl_u.f)
 static int snap_regions(unsigned reg[][2]) {
+#ifdef _WIN32
+    extern char __data_start__[] __asm__("__data_start__"), __data_end__[] __asm__("__data_end__");     /* the writable sections of the PE image (MinGW's default */
+    extern char __bss_start__[] __asm__("__bss_start__"), __bss_end__[] __asm__("__bss_end__");       /* linker script; asm names: no Win32 '_' prefix) */
+    int n = 0;
+    reg[n][0] = (unsigned)__data_start__ & ~0xfffu; reg[n][1] = (((unsigned)__data_end__ + 0xfffu) & ~0xfffu) - reg[n][0]; n++;
+    reg[n][0] = (unsigned)__bss_start__ & ~0xfffu; reg[n][1] = (((unsigned)__bss_end__ + 0xfffu) & ~0xfffu) - reg[n][0]; n++;
+#else
     const struct elf32_ehdr* eh = (const struct elf32_ehdr*)__ehdr_start;
     const struct elf32_phdr* ph = (const struct elf32_phdr*)(__ehdr_start + eh->phoff);
     int i, n = 0;
     for (i = 0; i < eh->phnum && n < 4; i++) if (ph[i].type == 1 && (ph[i].flags & 2u)) { reg[n][0] = ph[i].vaddr; reg[n][1] = ph[i].memsz; n++; }
+#endif
     reg[n][0] = 0x80000000u; reg[n][1] = 0x200000u; n++;
     reg[n][0] = 0x1f800000u; reg[n][1] = 0x1000u; n++;
     reg[n][0] = THREAD_STACK_WINDOW; reg[n][1] = THREAD_STACK_WINDOW_BYTES; n++;

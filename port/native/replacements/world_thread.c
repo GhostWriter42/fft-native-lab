@@ -32,9 +32,12 @@ static unsigned char g_wt_stacks[WT_SLOTS][WT_STACK_BYTES] __attribute__((aligne
 #endif
 
 void wt_switch(void** save_esp, void* new_esp);
+#define WT_STR2(x) #x
+#define WT_STR(x) WT_STR2(x)
+#define WT_ASYM(name) WT_STR(__USER_LABEL_PREFIX__) #name      /* Win32 prefixes C names with '_' */
 __asm__(".text\n"
-        ".globl wt_switch\n"
-        "wt_switch:\n"
+        ".globl " WT_ASYM(wt_switch) "\n"
+        WT_ASYM(wt_switch) ":\n"
         "    movl 4(%esp), %eax\n"
         "    movl 8(%esp), %edx\n"
         "    pushl %ebp\n"

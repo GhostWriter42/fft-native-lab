@@ -36,9 +36,12 @@ static unsigned char g_nt_stacks[NT_SLOTS][NT_STACK_BYTES] __attribute__((aligne
 
 /* void nt_switch(void** save_esp, void* new_esp): push the callee-saved registers, store esp, load the other esp, pop, return. */
 void nt_switch(void** save_esp, void* new_esp);
+#define WT_STR2(x) #x
+#define WT_STR(x) WT_STR2(x)
+#define WT_ASYM(name) WT_STR(__USER_LABEL_PREFIX__) #name      /* Win32 prefixes C names with '_' */
 __asm__(".text\n"
-        ".globl nt_switch\n"
-        "nt_switch:\n"
+        ".globl " WT_ASYM(nt_switch) "\n"
+        WT_ASYM(nt_switch) ":\n"
         "    movl 4(%esp), %eax\n"
         "    movl 8(%esp), %edx\n"
         "    pushl %ebp\n"

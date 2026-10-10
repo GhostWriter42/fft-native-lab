@@ -92,6 +92,8 @@ def main():
     ap.add_argument('--record', action='store_true', help='diagnostic: keep the last ~4 seconds of frames in memory and write them to port/build/shots/record-<time>/ when flashing is detected, on F10 and on exit')
     ap.add_argument('--pace', action='store_true', help='limit to 60 frames per second by the clock (for the headless test, where there is no vsync; with sound the audio queue already paces)')
     ap.add_argument('--test-audio', action='store_true', help='with --test-frames: play the sound too (default: muted in the headless test)')
+    ap.add_argument('--native-exe', nargs='?', const=str(ROOT / 'build' / 'win' / 'fft_native.exe'), default=None,
+                    help='run the Windows build of the game (port/native/win/build_win.py) instead of the container: no Docker needed')
     ap.add_argument('--two', action='store_true', help='two players on this computer: controller 2 is the second gamepad; in battle the units in --seat2 are played with it')
     ap.add_argument('--host', type=int, metavar='PORT', help='two players over the network: wait for the other player on this TCP port, then start together (you are player 1)')
     ap.add_argument('--join', metavar='HOST:PORT', help='two players over the network: connect to the host (you are player 2)')
@@ -168,10 +170,15 @@ def main():
             print('no audio device: playing without sound')
             audio = None
 
-    cmd = ['docker', 'run', '--rm', '-i', '--pull=never', '--name', name, '--cap-add', 'SYS_RAWIO', '-e', 'PLAY=1',
+    env = None
+    if args.native_exe:                                                         # the Windows build: the same pipes; FFT_MOUNTS stands in for the container's volumes
+        env = dict(os.environ)
+        env['FFT_MOUNTS'] = ';'.join([f'/disc={REPO}\\build\\extracted\\files', f'/disc.bin={BIN}', f'/session={session}', f'/states={STATES}',
+                                      f'/shots={ROOT}\\build\\shots', f'/run.cfg={session}\\run.cfg'])
+    cmd = [args.native_exe] if args.native_exe else ['docker', 'run', '--rm', '-i', '--pull=never', '--name', name, '--cap-add', 'SYS_RAWIO', '-e', 'PLAY=1',
            '--volume', f'{ROOT}:/port', '--volume', f'{VOL}:/ob', '--volume', f'{REPO}\\build\\extracted\\files:/disc:ro', '--volume', f'{BIN}:/disc.bin:ro',
            '--volume', f'{session}:/session', '--volume', f'{STATES}:/states', 'fft-decomp-dev:local', 'sh', '/port/native/build_run_lockstep.sh']
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0, env=env)
     err = {'last': '', 'who': 1}
 
     def err_reader():

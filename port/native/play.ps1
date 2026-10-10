@@ -13,12 +13,25 @@
 #   .\port\native\play.ps1 -Invite 7777          start alone; the other player is taken into the game in progress when they connect (you are player 1)
 #   .\port\native\play.ps1 -Join 192.168.1.20:7777   join the other player (you are player 2); -Delay N input delay in frames (default 6)
 #   the host decides the rules: -Seat2 MASK (battle unit slots player 2 plays, default 0x1a) -Hotseat MASK (slots made player-controlled, default 0x1e = the AI allies of the first battle) -RandomBattle
+# -Native  the Windows build of the game instead of the container (no Docker needed; implies -Gl): port\native\win\build_win.py builds
+#          port\build\win\fft_native.exe (needs the i686 GCC in port\build\toolchain, see WINDOWS-NATIVE.md); -Build rebuilds it
 # FFT_LS_VOL selects the docker volume that holds the compiled program (default fft-ls-objs).
-param([int]$Hd = 0, [int]$Scale = 3, [switch]$Build, [switch]$WorldCheat, [switch]$Verify, [int]$HostPort = 0, [int]$Invite = 0, [string]$Join = '', [int]$Delay = 6, [string]$Seat2 = '0x1a', [string]$Hotseat = '0x1e', [switch]$RandomBattle, [switch]$Gl, [switch]$Compare, [switch]$Record, [switch]$Two, [switch]$Filter)
+param([int]$Hd = 0, [int]$Scale = 3, [switch]$Build, [switch]$WorldCheat, [switch]$Verify, [int]$HostPort = 0, [int]$Invite = 0, [string]$Join = '', [int]$Delay = 6, [string]$Seat2 = '0x1a', [string]$Hotseat = '0x1e', [switch]$RandomBattle, [switch]$Gl, [switch]$Compare, [switch]$Record, [switch]$Two, [switch]$Filter, [switch]$Native)
 . (Join-Path $PSScriptRoot 'padgen.ps1')
-$vol = if ($env:FFT_LS_VOL) { $env:FFT_LS_VOL } else { 'fft-ls-objs' }
-$have = ((docker run --rm --pull=never --volume "${vol}:/ob" fft-decomp-dev:local sh -c 'test -x /ob/ls_pc/prog && echo yes' 2>$null) -join '').Trim()
-if ($Build -or $have -ne 'yes') {
+if ($Native) {
+    $Gl = $true
+    $exe = Join-Path (Split-Path $PSScriptRoot -Parent) 'build\win\fft_native.exe'
+    if ($Build -or -not (Test-Path $exe)) {
+        Write-Host "building the Windows program (about an hour the first time, minutes afterwards) ..."
+        python (Join-Path $PSScriptRoot 'win\build_win.py') | Select-Object -Last 3 | Out-Host
+        if (-not (Test-Path $exe)) { Write-Error 'the Windows build failed'; exit 1 }
+    }
+    $have = 'yes'
+} else {
+    $vol = if ($env:FFT_LS_VOL) { $env:FFT_LS_VOL } else { 'fft-ls-objs' }
+    $have = ((docker run --rm --pull=never --volume "${vol}:/ob" fft-decomp-dev:local sh -c 'test -x /ob/ls_pc/prog && echo yes' 2>$null) -join '').Trim()
+}
+if (-not $Native -and ($Build -or $have -ne 'yes')) {
     Write-Host "compiling the native game (a few minutes the first time) ..."
     & (Join-Path $PSScriptRoot 'lockstep.ps1') -BuildOnly -Scenario title -Gpu | Select-Object -Last 3 | Out-Host
     if ($LASTEXITCODE -ne 0) { Write-Error 'the build failed'; exit 1 }
@@ -48,6 +61,7 @@ if ($Gl) {                                                     # the graphics ca
     $glScale = if ($Hd -ge 1) { $Hd } else { 2 }
     $glArgs = @('--scale', $glScale, '--cfg', $cfg)
     if ($Filter) { $glArgs += @('--filter', 'epx') }
+    if ($Native) { $glArgs += '--native-exe' }
     if ($Two) { $glArgs += @('--two', '--seat2', $Seat2, '--hotseat', $Hotseat) }
     if ($HostPort) { $glArgs += @('--host', $HostPort, '--delay', $Delay, '--seat2', $Seat2, '--hotseat', $Hotseat) }
     if ($Join) { $glArgs += @('--join', $Join, '--delay', $Delay) }

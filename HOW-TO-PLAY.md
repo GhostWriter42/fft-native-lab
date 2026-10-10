@@ -22,6 +22,14 @@ emulators use). The game's own Save and Continue use it; the F1-F8 machine state
 Sound: the music and effects play through Windows audio (`--mute` with `play.py` to switch off). It has not been listened to by the author of this build: if it sounds wrong, the
 numbers in `NATIVE-RUNTIME.md` (Result 7) say what is and is not modelled.
 
+## Without Docker (Windows build)
+
+    powershell -File "C:\Storage\Build\FFT Mod\port\native\play.ps1" -Native -Hd 2
+
+runs the Windows build of the game (`port\build\win\fft_native.exe`) in the graphics-card viewer: no Docker Desktop, no virtual machine. The first
+start builds it (about an hour; it needs the i686 GCC unpacked in `port\build\toolchain`, see `WINDOWS-NATIVE.md`); `-Build` rebuilds it after
+changes. Everything else (keys, gamepads, saving, `-Filter`, `-Two`, `-HostPort` / `-Join`) works the same.
+
 ## Two players (co-op prototype)
 
 Each player runs their own copy; only controller values cross the network (see `port\native\netplay.py`). Player 1 plays the player-controlled units and the menus,
