@@ -23,7 +23,7 @@ Details and evidence: `NATIVE-RUNTIME.md` (design + results), `OVERNIGHT-REPORT.
 * **Platform-layer audit**: `port/tools/hle_audit.py` lists the state each replaced SDK call must keep. libgpu (Result 10) and libspu (Result 13) are fixed and the memory card is new (Result 14); the GTE's flag bits are still to be reviewed.
 * **Effect overlays**: 110 of the 512 effect files are code (the rest are scripts the battle code interprets). A test that forces abilities onto code-type effects crashes natively in the effect-script reader; not yet known whether the original misbehaves the same way there (Result 16).
 * **A Windows build without Docker** works (`play.ps1 -Native`, `WINDOWS-NATIVE.md`): the owner's whole first session is identical to the original code at every frame; the CPU viewer and joining a network game in progress still use the container.
-* The first battle's "no end condition" report (2026-10-08) was not reproduced: the battle ends, the story continues and the game saves.
+* **Fixed 2026-10-10: the first battle never ended in the play builds.** They were built with a test shortcut of the soak harness (`-Scenario title`) that skips `main_boot_reset_game_state`, which fills the KO status tables, so dead enemies never counted as defeated. Replaying the owner's session (auto-battle included) now reaches the victory scene. HD seams along mesh edges (texture lookups straying onto neighbouring texels at 2x-4x) are fixed too.
 
 ## How this differs from the repository it was forked from
 

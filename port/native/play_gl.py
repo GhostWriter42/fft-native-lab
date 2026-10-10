@@ -92,6 +92,7 @@ def main():
     ap.add_argument('--record', action='store_true', help='diagnostic: keep the last ~4 seconds of frames in memory and write them to port/build/shots/record-<time>/ when flashing is detected, on F10 and on exit')
     ap.add_argument('--pace', action='store_true', help='limit to 60 frames per second by the clock (for the headless test, where there is no vsync; with sound the audio queue already paces)')
     ap.add_argument('--test-audio', action='store_true', help='with --test-frames: play the sound too (default: muted in the headless test)')
+    ap.add_argument('--frame-times', default='', help='diagnostic: write every frame\'s wall time (game + transfer, GPU replay; ms) and trace size to this CSV file')
     ap.add_argument('--native-exe', nargs='?', const=str(ROOT / 'build' / 'win' / 'fft_native.exe'), default=None,
                     help='run the Windows build of the game (port/native/win/build_win.py) instead of the container: no Docker needed')
     ap.add_argument('--two', action='store_true', help='two players on this computer: controller 2 is the second gamepad; in battle the units in --seat2 are played with it')
@@ -343,6 +344,7 @@ def main():
         return n_alt >= 12
 
     nframes_box = [0]
+    ft_rows, ft_last = [], [time.perf_counter()]
     input_path = ROOT / 'build' / 'native' / 'ls' / 'last_input.txt'
     inp = {'last': 0, 'hist': [], 'pending_load': None, 'scene_start': None}  # hist: every controller change since POWER-ON as (frame, mask): exact even across state loads
     import json as json_
@@ -395,6 +397,10 @@ def main():
                     pass
                 break
             frame, ab, tb = struct.unpack('<HHI', hdr[2:10])
+            if args.frame_times:
+                now_ft = time.perf_counter()
+                ft_rows.append((frame, (now_ft - ft_last[0]) * 1000.0, tb))
+                ft_last[0] = now_ft
             if inp['pending_load'] is not None:                     # a state was loaded (F5..F8): its input history becomes this session's
                 slot, data = inp['pending_load']
                 inp['pending_load'] = None
@@ -541,6 +547,11 @@ def main():
         with open(log_path, 'a', encoding='utf-8') as lf:
             lf.write('viewer exception:\n' + tb)
     finally:
+        if args.frame_times and ft_rows:
+            with open(args.frame_times, 'w') as ftf:
+                ftf.write('frame,ms,trace_bytes\n')
+                for r_ in ft_rows:
+                    ftf.write(f'{r_[0]},{r_[1]:.3f},{r_[2]}\n')
         if inp['scene_start'] is not None:
             save_scene(state['n'])
         print(f'your controller input of this session is in {input_path} (replay it with --script "$(contents)")')
